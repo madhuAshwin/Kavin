@@ -10,6 +10,17 @@ PM Deposition Modelling" - Mayilvahanan I, Naresh K & Gandhimathi A (KCT, Coimba
 Author of this implementation: Claude (reconstructed from paper methodology)
 """
 
+import argparse
+import copy
+import queue
+import threading
+import traceback
+from dataclasses import dataclass
+from pathlib import Path as FilePath
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+import tkinter as tk
+from typing import Callable, Dict, List, Optional, Tuple
+
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -17,9 +28,8 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, Ellipse, Arc, PathPatch, FancyArrowPatch
 from matplotlib.path import Path
 from mpl_toolkits.mplot3d import Axes3D
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
-import json
+from openpyxl import Workbook, load_workbook
+from PIL import Image, ImageTk
 
 # ============================================================================
 # CONSTANTS
@@ -33,19 +43,127 @@ PARTICLE_DENSITY = 1000.0        # kg/m³ (unit density as per paper: 1.0 g/cm³
 GRAVITY = 9.81                   # m/s²
 MEAN_FREE_PATH = 0.066e-6        # m (mean free path of air molecules)
 
-# PM sizes in micrometers
-PM_SIZES = [0.1, 0.5, 1.0, 1.5, 2.0, 2.5, 10.0]
-
-# Number of particles per simulation
-N_PARTICLES = 10000
-
-# Age group categories from the paper
-AGE_GROUPS = {
+DEFAULT_PM_SIZES = [0.1, 0.5, 1.0, 1.5, 2.0, 2.5, 10.0]
+DEFAULT_N_PARTICLES = 10000
+DEFAULT_SEED = 42
+DEFAULT_AGE_GROUPS = {
     'D (21-30 yrs)': {'tidal_volume': 2800e-6, 'breathing_freq': 15, 'label': '21-30'},
     'C (31-35 yrs)': {'tidal_volume': 2600e-6, 'breathing_freq': 14, 'label': '31-35'},
     'B (36-40 yrs)': {'tidal_volume': 2400e-6, 'breathing_freq': 13, 'label': '36-40'},
     'A (41-50 yrs)': {'tidal_volume': 2200e-6, 'breathing_freq': 12, 'label': '41-50'},
 }
+
+DEFAULT_TEMPLATE_NAME = 'pollution_input_template.xlsx'
+OUTPUT_FILENAMES = {
+    'scatter': 'pm_3d_scatter.png',
+    'bars': 'pm_deposition_bars.png',
+    'heatmap': 'pm_heatmap.png',
+    'infographic': 'pm_lung_infographic.png',
+    'summary': 'pm_results_summary.txt',
+}
+WORKBOOK_SHEETS = {
+    'settings': 'simulation_settings',
+    'pm_sizes': 'pm_sizes',
+    'age_groups': 'age_groups',
+}
+
+
+@dataclass
+class AgeGroupConfig:
+    """Human-readable simulation input for a breathing cohort."""
+    key: str
+    tidal_volume_cm3: float
+    breathing_freq: float
+    label: str
+
+    @property
+    def tidal_volume_m3(self) -> float:
+        return self.tidal_volume_cm3 * 1e-6
+
+    def as_runtime_dict(self) -> Dict[str, float | str]:
+        return {
+            'tidal_volume': self.tidal_volume_m3,
+            'breathing_freq': self.breathing_freq,
+            'label': self.label,
+        }
+
+
+@dataclass
+class SimulationConfig:
+    """Runtime configuration shared by CLI, workbook loading, and the UI."""
+    n_particles: int
+    pm_sizes: List[float]
+    age_groups: Dict[str, AgeGroupConfig]
+    seed: int = DEFAULT_SEED
+
+    def runtime_age_groups(self) -> Dict[str, Dict[str, float | str]]:
+        return {
+            age_key: age_group.as_runtime_dict()
+            for age_key, age_group in self.age_groups.items()
+        }
+
+
+def get_default_config() -> SimulationConfig:
+    """Return the default configuration that mirrors the original script."""
+    age_groups = {
+        age_key: AgeGroupConfig(
+            key=age_key,
+            tidal_volume_cm3=age_data['tidal_volume'] * 1e6,
+            breathing_freq=age_data['breathing_freq'],
+            label=age_data['label'],
+        )
+        for age_key, age_data in DEFAULT_AGE_GROUPS.items()
+    }
+    return SimulationConfig(
+        n_particles=DEFAULT_N_PARTICLES,
+        pm_sizes=list(DEFAULT_PM_SIZES),
+        age_groups=age_groups,
+        seed=DEFAULT_SEED,
+    )
+
+
+def clone_config(config: SimulationConfig) -> SimulationConfig:
+    """Return a copy that can be mutated without affecting the defaults."""
+    return copy.deepcopy(config)
+
+
+def emit_log(message: str, log_callback: Optional[Callable[[str], None]] = None):
+    """Send a log line to either the UI callback or stdout."""
+    if log_callback is not None:
+        log_callback(message)
+    else:
+        try:
+            print(message)
+        except UnicodeEncodeError:
+            print(message.encode('ascii', errors='replace').decode('ascii'))
+
+
+def validate_numeric(value, field_name: str, *, allow_zero: bool = False) -> float:
+    """Parse numeric workbook cells with a clear validation error."""
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f'{field_name} must be numeric, got {value!r}.') from exc
+
+    if allow_zero:
+        if numeric_value < 0:
+            raise ValueError(f'{field_name} must be zero or greater, got {numeric_value}.')
+    elif numeric_value <= 0:
+        raise ValueError(f'{field_name} must be greater than zero, got {numeric_value}.')
+    return numeric_value
+
+
+def normalize_age_label(raw_label: str, fallback_key: str) -> str:
+    """Use a readable label in plots even if the workbook leaves it blank."""
+    text = (raw_label or '').strip()
+    return text if text else fallback_key
+
+
+def get_primary_age_key(config: SimulationConfig) -> str:
+    """Prefer the original paper's D-category when it exists."""
+    if 'D (21-30 yrs)' in config.age_groups:
+        return 'D (21-30 yrs)'
+    return next(iter(config.age_groups))
 
 # Lung regions mapped to airway generations
 REGION_MAP = {
@@ -314,24 +432,34 @@ def simulate_single_particle(
 
 
 def run_simulation(
-    n_particles: int = N_PARTICLES,
-    age_group: str = 'D (21-30 yrs)',
-    pm_sizes: List[float] = PM_SIZES,
-    seed: int = 42
+    n_particles: int,
+    age_group: str,
+    age_groups: Dict[str, Dict[str, float | str]],
+    pm_sizes: List[float],
+    seed: int = DEFAULT_SEED,
+    progress_callback: Optional[Callable[[Dict[str, object]], None]] = None,
+    progress_offset: int = 0,
+    progress_total: Optional[int] = None,
+    log_callback: Optional[Callable[[str], None]] = None,
 ) -> Dict[float, Dict[str, Tuple[float, float]]]:
     """
     Run full Monte Carlo simulation for all PM sizes.
 
     Returns: {pm_size: {region: (mean_deposition%, std%)}}
     """
+    if age_group not in age_groups:
+        raise KeyError(f'Unknown age group {age_group!r}.')
+
     rng = np.random.default_rng(seed)
     airways = build_weibel_lung()
-    tv = AGE_GROUPS[age_group]['tidal_volume']
-    bf = AGE_GROUPS[age_group]['breathing_freq']
+    tv = age_groups[age_group]['tidal_volume']
+    bf = age_groups[age_group]['breathing_freq']
 
     results = {}
+    update_interval = max(1, n_particles // 100)
+    pm_count = len(pm_sizes)
 
-    for pm in pm_sizes:
+    for pm_index, pm in enumerate(pm_sizes, start=1):
         region_deposits = {region: [] for region in REGION_MAP}
 
         for i in range(n_particles):
@@ -339,16 +467,33 @@ def run_simulation(
             for region in REGION_MAP:
                 region_deposits[region].append(dep[region] * 100)  # as percentage
 
+            if progress_callback is not None and ((i + 1) % update_interval == 0 or i + 1 == n_particles):
+                completed_age_units = (pm_index - 1) * n_particles + (i + 1)
+                progress_callback({
+                    'stage': 'simulation',
+                    'age_group': age_group,
+                    'pm_size': pm,
+                    'pm_index': pm_index,
+                    'pm_total': pm_count,
+                    'particle': i + 1,
+                    'particle_total': n_particles,
+                    'completed_units': progress_offset + completed_age_units,
+                    'total_units': progress_total,
+                })
+
         results[pm] = {}
         for region in REGION_MAP:
             vals = np.array(region_deposits[region])
             results[pm][region] = (float(np.mean(vals)), float(np.std(vals)))
 
         total_dep = sum(results[pm][r][0] for r in REGION_MAP)
-        print(f"  PM {pm:>4.1f} µm → Total deposition: {total_dep:5.1f}% "
-              f"(ET: {results[pm]['Extra-thoracic'][0]:5.1f}%, "
-              f"Tubular: {results[pm]['Conducting (Tubular)'][0]:5.1f}%, "
-              f"Alveolar: {results[pm]['Alveolar'][0]:5.1f}%)")
+        emit_log(
+            f"  PM {pm:>4.1f} um -> Total deposition: {total_dep:5.1f}% "
+            f"(ET: {results[pm]['Extra-thoracic'][0]:5.1f}%, "
+            f"Tubular: {results[pm]['Conducting (Tubular)'][0]:5.1f}%, "
+            f"Alveolar: {results[pm]['Alveolar'][0]:5.1f}%)",
+            log_callback,
+        )
 
     return results
 
@@ -371,7 +516,12 @@ def monte_carlo_formula(n_particles: int, unit_density: float,
 # 3D VISUALIZATION (Fig 3.2 from paper)
 # ============================================================================
 
-def generate_3d_scatter(results: Dict, save_path: str = 'pm_3d_scatter.png'):
+def generate_3d_scatter(
+    results: Dict,
+    pm_sizes: List[float],
+    save_path: str = 'pm_3d_scatter.png',
+    log_callback: Optional[Callable[[str], None]] = None,
+):
     """
     Generate 3D scatter plot of PM distribution in alveolar system.
     Reproduces Fig 3.2 from the paper.
@@ -400,8 +550,13 @@ def generate_3d_scatter(results: Dict, save_path: str = 'pm_3d_scatter.png'):
     }
 
     rng = np.random.default_rng(123)
+    palette = plt.cm.turbo(np.linspace(0.08, 0.92, len(pm_sizes)))
+    fallback_colors = {
+        pm: palette[index]
+        for index, pm in enumerate(pm_sizes)
+    }
 
-    for pm in PM_SIZES:
+    for pm in pm_sizes:
         # Number of scatter points proportional to alveolar deposition
         alv_dep = results[pm]['Alveolar'][0]
         n_points = max(int(alv_dep * 30), 20)
@@ -417,7 +572,15 @@ def generate_3d_scatter(results: Dict, save_path: str = 'pm_3d_scatter.png'):
         y = r * np.sin(phi) * np.sin(theta)
         z = r * np.cos(phi) - 10  # shift downward (lungs are below trachea)
 
-        ax.scatter(x, y, z, c=colors[pm], s=8, alpha=0.6, label=labels[pm])
+        ax.scatter(
+            x,
+            y,
+            z,
+            c=[colors.get(pm, fallback_colors[pm])],
+            s=8,
+            alpha=0.6,
+            label=labels.get(pm, f'PM {pm}'),
+        )
 
     ax.set_xlabel('X (mm)', fontsize=10)
     ax.set_ylabel('Y (mm)', fontsize=10)
@@ -430,14 +593,21 @@ def generate_3d_scatter(results: Dict, save_path: str = 'pm_3d_scatter.png'):
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  → Saved 3D scatter plot: {save_path}")
+    emit_log(f"  -> Saved 3D scatter plot: {save_path}", log_callback)
 
 
 # ============================================================================
 # BAR CHART VISUALIZATION (Fig 4.1 from paper)
 # ============================================================================
 
-def generate_deposition_bar_charts(all_age_results: Dict, save_path: str = 'pm_deposition_bars.png'):
+def generate_deposition_bar_charts(
+    all_age_results: Dict,
+    pm_sizes: List[float],
+    age_groups: Dict[str, AgeGroupConfig],
+    n_particles: int,
+    save_path: str = 'pm_deposition_bars.png',
+    log_callback: Optional[Callable[[str], None]] = None,
+):
     """
     Generate grouped bar charts showing PM deposition % by region and age group.
     Reproduces Fig 4.1 from the paper.
@@ -453,45 +623,53 @@ def generate_deposition_bar_charts(all_age_results: Dict, save_path: str = 'pm_d
 
     for idx, (region, title) in enumerate(zip(regions, region_titles)):
         ax = axes[idx]
-        x = np.arange(len(PM_SIZES))
+        x = np.arange(len(pm_sizes))
 
         for i, (age_key, age_data) in enumerate(all_age_results.items()):
-            means = [age_data[pm][region][0] for pm in PM_SIZES]
-            label = AGE_GROUPS[age_key]['label'] + ' yrs'
+            means = [age_data[pm][region][0] for pm in pm_sizes]
+            label = age_groups[age_key].label
+            if 'yr' not in label.lower():
+                label = f'{label} yrs'
             ax.bar(x + i * bar_width, means, bar_width,
-                   label=label, color=bar_colors[i], alpha=0.85, edgecolor='white')
+                   label=label, color=bar_colors[i % len(bar_colors)], alpha=0.85, edgecolor='white')
 
         ax.set_xlabel('Particle Size (µm)', fontsize=11)
         ax.set_ylabel('Deposition (%)', fontsize=11)
         ax.set_title(title, fontsize=12, fontweight='bold')
         ax.set_xticks(x + bar_width * 1.5)
-        ax.set_xticklabels([f'{pm}' for pm in PM_SIZES], fontsize=9)
+        ax.set_xticklabels([f'{pm}' for pm in pm_sizes], fontsize=9)
         ax.legend(fontsize=8, loc='upper right')
         ax.grid(axis='y', alpha=0.3)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
 
-    plt.suptitle('Percent Occupancy of PM in Respiratory System by Age Group\n(Monte Carlo Simulation, N=10,000 particles)',
+    plt.suptitle(f'Percent Occupancy of PM in Respiratory System by Age Group\n(Monte Carlo Simulation, N={n_particles:,} particles)',
                  fontsize=14, fontweight='bold', y=1.02)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  → Saved deposition bar charts: {save_path}")
+    emit_log(f"  -> Saved deposition bar charts: {save_path}", log_callback)
 
 
 # ============================================================================
 # DEPOSITION HEATMAP
 # ============================================================================
 
-def generate_heatmap(results: Dict, age_label: str, save_path: str = 'pm_heatmap.png'):
+def generate_heatmap(
+    results: Dict,
+    age_label: str,
+    pm_sizes: List[float],
+    save_path: str = 'pm_heatmap.png',
+    log_callback: Optional[Callable[[str], None]] = None,
+):
     """
     Generate a heatmap of deposition % by PM size and lung region.
     """
     regions = list(REGION_MAP.keys())
     region_short = ['Extra-thoracic', 'Tubular', 'Alveolar']
-    data = np.zeros((len(PM_SIZES), len(regions)))
+    data = np.zeros((len(pm_sizes), len(regions)))
 
-    for i, pm in enumerate(PM_SIZES):
+    for i, pm in enumerate(pm_sizes):
         for j, region in enumerate(regions):
             data[i, j] = results[pm][region][0]
 
@@ -500,11 +678,11 @@ def generate_heatmap(results: Dict, age_label: str, save_path: str = 'pm_heatmap
 
     ax.set_xticks(range(len(regions)))
     ax.set_xticklabels(region_short, fontsize=11)
-    ax.set_yticks(range(len(PM_SIZES)))
-    ax.set_yticklabels([f'PM {pm}' for pm in PM_SIZES], fontsize=11)
+    ax.set_yticks(range(len(pm_sizes)))
+    ax.set_yticklabels([f'PM {pm}' for pm in pm_sizes], fontsize=11)
 
     # Annotate cells
-    for i in range(len(PM_SIZES)):
+    for i in range(len(pm_sizes)):
         for j in range(len(regions)):
             val = data[i, j]
             color = 'white' if val > data.max() * 0.6 else 'black'
@@ -518,21 +696,31 @@ def generate_heatmap(results: Dict, age_label: str, save_path: str = 'pm_heatmap
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  → Saved heatmap: {save_path}")
+    emit_log(f"  -> Saved heatmap: {save_path}", log_callback)
 
 
 # ============================================================================
 # LUNG INFOGRAPHIC — ANNOTATED ANATOMICAL PANEL
 # ============================================================================
 
-def generate_lung_infographic(results: Dict, age_label: str,
-                              pm_size: float = 2.5,
-                              save_path: str = 'pm_lung_infographic.png'):
+def generate_lung_infographic(
+    results: Dict,
+    age_label: str,
+    pm_sizes: List[float],
+    pm_size: Optional[float] = None,
+    save_path: str = 'pm_lung_infographic.png',
+    log_callback: Optional[Callable[[str], None]] = None,
+):
     """
     Generate an annotated lung infographic showing PM deposition by region.
     Left panel: stylized anatomical lung diagram with color-coded regions.
     Right panel: horizontal bar chart of deposition fractions.
     """
+    if not pm_sizes:
+        raise ValueError('At least one PM size is required to generate the infographic.')
+    if pm_size is None:
+        pm_size = 2.5 if 2.5 in pm_sizes else pm_sizes[0]
+
     et_dep = results[pm_size]['Extra-thoracic'][0]
     tb_dep = results[pm_size]['Conducting (Tubular)'][0]
     al_dep = results[pm_size]['Alveolar'][0]
@@ -849,7 +1037,7 @@ def generate_lung_infographic(results: Dict, age_label: str,
 
     col_labels = ['PM (µm)', 'ET (%)', 'Tubular (%)', 'Alveolar (%)', 'Total (%)']
     table_data = []
-    for pm in PM_SIZES:
+    for pm in pm_sizes:
         et = results[pm]['Extra-thoracic'][0]
         tb = results[pm]['Conducting (Tubular)'][0]
         al = results[pm]['Alveolar'][0]
@@ -868,94 +1056,713 @@ def generate_lung_infographic(results: Dict, age_label: str,
         table[0, j].set_text_props(color='white', fontweight='bold')
 
     # Highlight the selected PM row
-    pm_idx = PM_SIZES.index(pm_size) + 1  # +1 for header
+    pm_idx = pm_sizes.index(pm_size) + 1  # +1 for header
     for j in range(len(col_labels)):
         table[pm_idx, j].set_facecolor('#ffeaa7')
         table[pm_idx, j].set_edgecolor('#f39c12')
 
     # Alternate row shading
-    for i in range(1, len(PM_SIZES) + 1):
+    for i in range(1, len(pm_sizes) + 1):
         if i != pm_idx and i % 2 == 0:
             for j in range(len(col_labels)):
                 table[i, j].set_facecolor('#f0f0f0')
 
     plt.savefig(save_path, dpi=180, bbox_inches='tight', facecolor=fig.get_facecolor())
     plt.close()
-    print(f"  → Saved lung infographic: {save_path}")
+    emit_log(f"  -> Saved lung infographic: {save_path}", log_callback)
 
 
 # ============================================================================
 # RESULTS TABLE
 # ============================================================================
 
-def print_results_table(results: Dict, age_label: str):
-    """Print formatted results table matching Table 4.1 from the paper."""
-    print(f"\n{'='*70}")
-    print(f"  PM Deposition Results — {age_label}")
-    print(f"{'='*70}")
-    print(f"  {'PM (µm)':<10} {'Extra-thoracic':>16} {'Tubular':>16} {'Alveolar':>16}")
-    print(f"  {'-'*58}")
+def render_results_table(results: Dict, age_label: str, pm_sizes: List[float]) -> str:
+    """Render a formatted results table matching Table 4.1 from the paper."""
+    lines = [
+        '',
+        '=' * 70,
+        f'  PM Deposition Results - {age_label}',
+        '=' * 70,
+        f"  {'PM (um)':<10} {'Extra-thoracic':>16} {'Tubular':>16} {'Alveolar':>16}",
+        f"  {'-' * 58}",
+    ]
 
-    for pm in PM_SIZES:
+    for pm in pm_sizes:
         et = results[pm]['Extra-thoracic']
         tb = results[pm]['Conducting (Tubular)']
         al = results[pm]['Alveolar']
-        print(f"  PM {pm:<6.1f} {et[0]:>11.1f}% ±{et[1]:<4.1f} "
-              f"{tb[0]:>11.1f}% ±{tb[1]:<4.1f} "
-              f"{al[0]:>11.1f}% ±{al[1]:<4.1f}")
+        lines.append(
+            f"  PM {pm:<6.1f} {et[0]:>11.1f}% +/-{et[1]:<4.1f} "
+            f"{tb[0]:>11.1f}% +/-{tb[1]:<4.1f} "
+            f"{al[0]:>11.1f}% +/-{al[1]:<4.1f}"
+        )
 
-    print(f"{'='*70}\n")
+    lines.extend(['=' * 70, ''])
+    return '\n'.join(lines)
+
+
+def print_results_table(
+    results: Dict,
+    age_label: str,
+    pm_sizes: List[float],
+    log_callback: Optional[Callable[[str], None]] = None,
+):
+    """Print or forward a formatted results table."""
+    emit_log(render_results_table(results, age_label, pm_sizes), log_callback)
 
 
 # ============================================================================
-# MAIN
+# WORKBOOK IO AND APPLICATION ORCHESTRATION
 # ============================================================================
 
-def main():
-    print("=" * 70)
-    print("  PM DEPOSITION MONTE CARLO SIMULATION")
-    print("  Based on Mayilvahanan et al. (KCT, Coimbatore)")
-    print("  Stochastic lung model with Weibel geometry")
-    print(f"  Particles per simulation: {N_PARTICLES:,}")
-    print("=" * 70)
+def validate_integer(value, field_name: str, *, allow_zero: bool = False) -> int:
+    """Parse integer workbook cells while rejecting fractional values."""
+    numeric_value = validate_numeric(value, field_name, allow_zero=allow_zero)
+    if not float(numeric_value).is_integer():
+        raise ValueError(f'{field_name} must be a whole number, got {numeric_value}.')
+    return int(numeric_value)
+
+
+def format_age_display(age_group: AgeGroupConfig) -> str:
+    """Use a readable label in the UI and in generated charts."""
+    return age_group.label if 'yr' in age_group.label.lower() else f'{age_group.label} yrs'
+
+
+def report_progress(
+    progress_callback: Optional[Callable[[Dict[str, object]], None]],
+    *,
+    stage: str,
+    message: str,
+    completed_units: int,
+    total_units: Optional[int],
+    **extra,
+):
+    """Send a normalized progress payload to the UI or CLI caller."""
+    if progress_callback is None:
+        return
+
+    payload: Dict[str, object] = {
+        'stage': stage,
+        'message': message,
+        'completed_units': completed_units,
+        'total_units': total_units,
+    }
+    if total_units:
+        payload['progress'] = max(0.0, min(1.0, completed_units / total_units))
+    payload.update(extra)
+    progress_callback(payload)
+
+
+def create_template_workbook(
+    file_path: str | FilePath,
+    config: Optional[SimulationConfig] = None,
+):
+    """Create a starter workbook that mirrors the script's default data."""
+    config = clone_config(config or get_default_config())
+    target_path = FilePath(file_path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    workbook = Workbook()
+    settings_sheet = workbook.active
+    settings_sheet.title = WORKBOOK_SHEETS['settings']
+    settings_sheet.append(['key', 'value', 'description'])
+    settings_sheet.append([
+        'n_particles',
+        config.n_particles,
+        'Particles simulated per PM size for each age group.',
+    ])
+    settings_sheet.append([
+        'seed',
+        config.seed,
+        'Random seed used to reproduce stochastic airway perturbations.',
+    ])
+
+    pm_sheet = workbook.create_sheet(WORKBOOK_SHEETS['pm_sizes'])
+    pm_sheet.append(['pm_size_um'])
+    for pm_size in config.pm_sizes:
+        pm_sheet.append([pm_size])
+
+    age_sheet = workbook.create_sheet(WORKBOOK_SHEETS['age_groups'])
+    age_sheet.append(['group_key', 'label', 'tidal_volume_cm3', 'breathing_freq_per_min'])
+    for age_key, age_group in config.age_groups.items():
+        age_sheet.append([
+            age_key,
+            age_group.label,
+            age_group.tidal_volume_cm3,
+            age_group.breathing_freq,
+        ])
+
+    workbook.save(target_path)
+
+
+def read_sheet_headers(worksheet) -> Dict[str, int]:
+    """Return a header-to-index map for a workbook sheet."""
+    headers = next(worksheet.iter_rows(min_row=1, max_row=1, values_only=True), None)
+    if headers is None:
+        raise ValueError(f'Sheet {worksheet.title!r} is empty.')
+
+    return {
+        str(header).strip(): index
+        for index, header in enumerate(headers)
+        if header is not None and str(header).strip()
+    }
+
+
+def load_config_from_workbook(file_path: str | FilePath) -> SimulationConfig:
+    """Load and validate a simulation workbook."""
+    source_path = FilePath(file_path)
+    if not source_path.exists():
+        raise FileNotFoundError(f'Workbook not found: {source_path}')
+
+    workbook = load_workbook(source_path, data_only=True)
+    try:
+        missing_sheets = [
+            sheet_name
+            for sheet_name in WORKBOOK_SHEETS.values()
+            if sheet_name not in workbook.sheetnames
+        ]
+        if missing_sheets:
+            raise ValueError(f'Missing workbook sheets: {", ".join(missing_sheets)}.')
+
+        settings_sheet = workbook[WORKBOOK_SHEETS['settings']]
+        settings = {}
+        for row in settings_sheet.iter_rows(min_row=2, values_only=True):
+            key = row[0] if len(row) > 0 else None
+            value = row[1] if len(row) > 1 else None
+            if key is None or str(key).strip() == '':
+                continue
+            settings[str(key).strip()] = value
+
+        n_particles = validate_integer(settings.get('n_particles'), 'n_particles')
+        seed_value = settings.get('seed', DEFAULT_SEED)
+        seed = validate_integer(seed_value if seed_value is not None else DEFAULT_SEED, 'seed', allow_zero=True)
+
+        pm_sheet = workbook[WORKBOOK_SHEETS['pm_sizes']]
+        pm_headers = read_sheet_headers(pm_sheet)
+        if 'pm_size_um' not in pm_headers:
+            raise ValueError(f"Sheet {pm_sheet.title!r} must contain a 'pm_size_um' column.")
+        pm_sizes = []
+        pm_index = pm_headers['pm_size_um']
+        for row_number, row in enumerate(pm_sheet.iter_rows(min_row=2, values_only=True), start=2):
+            value = row[pm_index] if pm_index < len(row) else None
+            if value is None or str(value).strip() == '':
+                continue
+            pm_sizes.append(validate_numeric(value, f'pm_size_um (row {row_number})'))
+        if not pm_sizes:
+            raise ValueError('The workbook must include at least one PM size.')
+
+        age_sheet = workbook[WORKBOOK_SHEETS['age_groups']]
+        age_headers = read_sheet_headers(age_sheet)
+        required_age_headers = ['group_key', 'label', 'tidal_volume_cm3', 'breathing_freq_per_min']
+        missing_age_headers = [header for header in required_age_headers if header not in age_headers]
+        if missing_age_headers:
+            raise ValueError(
+                f"Sheet {age_sheet.title!r} is missing required columns: {', '.join(missing_age_headers)}."
+            )
+
+        age_groups: Dict[str, AgeGroupConfig] = {}
+        for row_number, row in enumerate(age_sheet.iter_rows(min_row=2, values_only=True), start=2):
+            if all(cell is None or str(cell).strip() == '' for cell in row):
+                continue
+
+            group_key = row[age_headers['group_key']]
+            if group_key is None or str(group_key).strip() == '':
+                raise ValueError(f'group_key is required in age_groups row {row_number}.')
+            group_key = str(group_key).strip()
+            if group_key in age_groups:
+                raise ValueError(f'Duplicate age-group key {group_key!r} in row {row_number}.')
+
+            label = normalize_age_label(row[age_headers['label']], group_key)
+            tidal_volume_cm3 = validate_numeric(
+                row[age_headers['tidal_volume_cm3']],
+                f'tidal_volume_cm3 (row {row_number})',
+            )
+            breathing_freq = validate_numeric(
+                row[age_headers['breathing_freq_per_min']],
+                f'breathing_freq_per_min (row {row_number})',
+            )
+            age_groups[group_key] = AgeGroupConfig(
+                key=group_key,
+                label=label,
+                tidal_volume_cm3=tidal_volume_cm3,
+                breathing_freq=breathing_freq,
+            )
+
+        if not age_groups:
+            raise ValueError('The workbook must include at least one age-group row.')
+
+        return SimulationConfig(
+            n_particles=n_particles,
+            pm_sizes=pm_sizes,
+            age_groups=age_groups,
+            seed=seed,
+        )
+    finally:
+        workbook.close()
+
+
+def save_text_file(file_path: str | FilePath, content: str):
+    """Write UTF-8 text output to disk."""
+    FilePath(file_path).write_text(content, encoding='utf-8')
+
+
+def run_application(
+    config: SimulationConfig,
+    output_dir: str | FilePath = '.',
+    progress_callback: Optional[Callable[[Dict[str, object]], None]] = None,
+    log_callback: Optional[Callable[[str], None]] = None,
+) -> Dict[str, object]:
+    """Execute the full workbook-driven simulation and write outputs."""
+    config = clone_config(config)
+    if not config.pm_sizes:
+        raise ValueError('The simulation configuration does not contain any PM sizes.')
+    if not config.age_groups:
+        raise ValueError('The simulation configuration does not contain any age groups.')
+
+    output_path = FilePath(output_dir).expanduser().resolve()
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    runtime_age_groups = config.runtime_age_groups()
+    age_keys = list(config.age_groups.keys())
+    primary_age_key = get_primary_age_key(config)
+    total_units = len(age_keys) * len(config.pm_sizes) * config.n_particles + len(OUTPUT_FILENAMES)
+    completed_units = 0
+
+    emit_log('=' * 70, log_callback)
+    emit_log('  PM DEPOSITION MONTE CARLO SIMULATION', log_callback)
+    emit_log('  XLSX-driven stochastic lung model with Weibel geometry', log_callback)
+    emit_log(f'  Particles per simulation: {config.n_particles:,}', log_callback)
+    emit_log(f'  Output directory: {output_path}', log_callback)
+    emit_log('=' * 70, log_callback)
+    report_progress(
+        progress_callback,
+        stage='initializing',
+        message='Preparing simulation inputs...',
+        completed_units=completed_units,
+        total_units=total_units,
+    )
 
     all_age_results = {}
+    for age_key in age_keys:
+        age_group = config.age_groups[age_key]
+        age_display = format_age_display(age_group)
+        emit_log(f'\n> Simulating age group: {age_display}', log_callback)
+        emit_log(
+            f'  Tidal volume: {age_group.tidal_volume_cm3:.0f} cm3, '
+            f'Breathing freq: {age_group.breathing_freq}/min',
+            log_callback,
+        )
 
-    for age_key in AGE_GROUPS:
-        label = AGE_GROUPS[age_key]['label']
-        print(f"\n▶ Simulating age group: {label} years")
-        print(f"  Tidal volume: {AGE_GROUPS[age_key]['tidal_volume']*1e6:.0f} cm³, "
-              f"Breathing freq: {AGE_GROUPS[age_key]['breathing_freq']}/min")
+        age_offset = completed_units
+
+        def on_age_progress(payload: Dict[str, object], *, current_age=age_display, current_key=age_key):
+            report_progress(
+                progress_callback,
+                stage='simulation',
+                message=(
+                    f'Simulating {current_age} | PM {payload["pm_size"]} um '
+                    f'({payload["particle"]}/{payload["particle_total"]})'
+                ),
+                completed_units=int(payload['completed_units']),
+                total_units=total_units,
+                age_group=current_key,
+                pm_size=payload['pm_size'],
+            )
 
         results = run_simulation(
-            n_particles=N_PARTICLES,
+            n_particles=config.n_particles,
             age_group=age_key,
-            pm_sizes=PM_SIZES
+            age_groups=runtime_age_groups,
+            pm_sizes=config.pm_sizes,
+            seed=config.seed,
+            progress_callback=on_age_progress,
+            progress_offset=age_offset,
+            progress_total=total_units,
+            log_callback=log_callback,
         )
         all_age_results[age_key] = results
+        completed_units = age_offset + config.n_particles * len(config.pm_sizes)
 
-    # Print detailed table for D-category (21-30 yrs) — matches paper's Table 4.1
-    d_key = 'D (21-30 yrs)'
-    print_results_table(all_age_results[d_key], "D-Category Workers (21-30 yrs)")
+    primary_age = config.age_groups[primary_age_key]
+    primary_results = all_age_results[primary_age_key]
+    summary_text = render_results_table(primary_results, primary_age_key, config.pm_sizes)
 
-    # Apply paper's Monte Carlo formula for 8hr exposure
-    print("\n▶ Monte Carlo 8-Hour Exposure Formula (Paper's method):")
-    print(f"  Formula: MC = (30 × N × ρ) / (TV × BF)")
-    for n in [250, 1000, 2500]:
-        mc = monte_carlo_formula(n, 1.0, 2800, 15)
-        print(f"  N={n:>5} particles → MC factor = {mc:.4f}")
+    formula_lines = [
+        '',
+        "> Monte Carlo 8-Hour Exposure Formula (Paper's method):",
+        '  Formula: MC = (30 x N x rho) / (TV x BF)',
+    ]
+    for particle_count in [250, 1000, 2500]:
+        mc_value = monte_carlo_formula(
+            particle_count,
+            1.0,
+            primary_age.tidal_volume_cm3,
+            primary_age.breathing_freq,
+        )
+        formula_lines.append(f'  N={particle_count:>5} particles -> MC factor = {mc_value:.4f}')
+    full_summary_text = summary_text + '\n'.join(formula_lines) + '\n'
 
-    # Generate visualizations
-    print("\n▶ Generating visualizations...")
-    generate_3d_scatter(all_age_results[d_key], 'pm_3d_scatter.png')
-    generate_deposition_bar_charts(all_age_results, 'pm_deposition_bars.png')
-    generate_heatmap(all_age_results[d_key], 'D-Category (21-30 yrs)', 'pm_heatmap.png')
-    generate_lung_infographic(all_age_results[d_key], 'D-Category (21-30 yrs)',
-                              pm_size=2.5, save_path='pm_lung_infographic.png')
+    summary_path = output_path / OUTPUT_FILENAMES['summary']
+    save_text_file(summary_path, full_summary_text)
+    emit_log(full_summary_text, log_callback)
+    completed_units += 1
+    report_progress(
+        progress_callback,
+        stage='outputs',
+        message='Saved textual summary.',
+        completed_units=completed_units,
+        total_units=total_units,
+    )
 
-    print("\n✓ Simulation complete!")
-    return all_age_results
+    emit_log('\n> Generating visualizations...', log_callback)
+    output_files = {'summary': str(summary_path)}
+
+    scatter_path = output_path / OUTPUT_FILENAMES['scatter']
+    generate_3d_scatter(primary_results, config.pm_sizes, str(scatter_path), log_callback)
+    output_files['scatter'] = str(scatter_path)
+    completed_units += 1
+    report_progress(
+        progress_callback,
+        stage='outputs',
+        message='Generated 3D scatter plot.',
+        completed_units=completed_units,
+        total_units=total_units,
+    )
+
+    bars_path = output_path / OUTPUT_FILENAMES['bars']
+    generate_deposition_bar_charts(
+        all_age_results,
+        config.pm_sizes,
+        config.age_groups,
+        config.n_particles,
+        str(bars_path),
+        log_callback,
+    )
+    output_files['bars'] = str(bars_path)
+    completed_units += 1
+    report_progress(
+        progress_callback,
+        stage='outputs',
+        message='Generated age-group deposition bar charts.',
+        completed_units=completed_units,
+        total_units=total_units,
+    )
+
+    heatmap_path = output_path / OUTPUT_FILENAMES['heatmap']
+    generate_heatmap(primary_results, primary_age_key, config.pm_sizes, str(heatmap_path), log_callback)
+    output_files['heatmap'] = str(heatmap_path)
+    completed_units += 1
+    report_progress(
+        progress_callback,
+        stage='outputs',
+        message='Generated regional heatmap.',
+        completed_units=completed_units,
+        total_units=total_units,
+    )
+
+    infographic_path = output_path / OUTPUT_FILENAMES['infographic']
+    generate_lung_infographic(
+        primary_results,
+        primary_age_key,
+        config.pm_sizes,
+        pm_size=2.5 if 2.5 in config.pm_sizes else config.pm_sizes[0],
+        save_path=str(infographic_path),
+        log_callback=log_callback,
+    )
+    output_files['infographic'] = str(infographic_path)
+    completed_units += 1
+    report_progress(
+        progress_callback,
+        stage='outputs',
+        message='Generated lung infographic.',
+        completed_units=completed_units,
+        total_units=total_units,
+    )
+
+    emit_log('\nSimulation complete!', log_callback)
+    report_progress(
+        progress_callback,
+        stage='complete',
+        message='Simulation complete.',
+        completed_units=total_units,
+        total_units=total_units,
+    )
+    return {
+        'config': config,
+        'results': all_age_results,
+        'output_files': output_files,
+        'summary_text': full_summary_text,
+        'output_dir': str(output_path),
+    }
+
+
+class PollutionParticleApp:
+    """Native desktop UI for workbook-driven simulations."""
+
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.root.title('PM Deposition Simulator')
+        self.root.geometry('1440x920')
+        self.root.minsize(1100, 760)
+
+        self.message_queue: queue.Queue = queue.Queue()
+        self.worker_thread: Optional[threading.Thread] = None
+        self.preview_images: Dict[str, ImageTk.PhotoImage] = {}
+
+        self.input_path_var = tk.StringVar(value=str((FilePath.cwd() / DEFAULT_TEMPLATE_NAME).resolve()))
+        self.output_dir_var = tk.StringVar(value=str(FilePath.cwd()))
+        self.status_var = tk.StringVar(value='Select an Excel workbook and an output directory, then run the simulation.')
+        self.progress_var = tk.DoubleVar(value=0.0)
+
+        self._build_layout()
+        self.root.after(100, self.process_queue)
+
+    def _build_layout(self):
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(1, weight=1)
+
+        controls = ttk.Frame(self.root, padding=16)
+        controls.grid(row=0, column=0, sticky='ew')
+        controls.columnconfigure(1, weight=1)
+
+        ttk.Label(controls, text='XLSX Input').grid(row=0, column=0, sticky='w', padx=(0, 12), pady=(0, 8))
+        ttk.Entry(controls, textvariable=self.input_path_var).grid(row=0, column=1, sticky='ew', pady=(0, 8))
+        ttk.Button(controls, text='Browse...', command=self.choose_input_file).grid(row=0, column=2, padx=(12, 6), pady=(0, 8))
+        ttk.Button(controls, text='Create Template', command=self.create_template).grid(row=0, column=3, pady=(0, 8))
+
+        ttk.Label(controls, text='Output Directory').grid(row=1, column=0, sticky='w', padx=(0, 12), pady=(0, 8))
+        ttk.Entry(controls, textvariable=self.output_dir_var).grid(row=1, column=1, sticky='ew', pady=(0, 8))
+        ttk.Button(controls, text='Browse...', command=self.choose_output_directory).grid(row=1, column=2, padx=(12, 6), pady=(0, 8))
+
+        self.run_button = ttk.Button(controls, text='Run Simulation', command=self.start_run)
+        self.run_button.grid(row=1, column=3, pady=(0, 8))
+
+        ttk.Label(controls, textvariable=self.status_var).grid(row=2, column=0, columnspan=4, sticky='w', pady=(4, 6))
+        ttk.Progressbar(controls, variable=self.progress_var, maximum=100).grid(row=3, column=0, columnspan=4, sticky='ew')
+
+        content = ttk.Panedwindow(self.root, orient='horizontal')
+        content.grid(row=1, column=0, sticky='nsew', padx=16, pady=(0, 16))
+
+        log_frame = ttk.Frame(content, padding=8)
+        preview_frame = ttk.Frame(content, padding=8)
+        content.add(log_frame, weight=1)
+        content.add(preview_frame, weight=2)
+
+        ttk.Label(log_frame, text='Run Log').pack(anchor='w')
+        self.log_text = scrolledtext.ScrolledText(log_frame, wrap='word', height=20)
+        self.log_text.pack(fill='both', expand=True, pady=(8, 0))
+        self.log_text.configure(state='disabled')
+
+        ttk.Label(preview_frame, text='Output Preview').pack(anchor='w')
+        self.preview_notebook = ttk.Notebook(preview_frame)
+        self.preview_notebook.pack(fill='both', expand=True, pady=(8, 0))
+        self.show_placeholder_preview('Run the simulation to preview the generated charts here.')
+
+    def choose_input_file(self):
+        file_path = filedialog.askopenfilename(
+            title='Select simulation workbook',
+            filetypes=[('Excel Workbook', '*.xlsx')],
+        )
+        if file_path:
+            self.input_path_var.set(file_path)
+
+    def choose_output_directory(self):
+        directory = filedialog.askdirectory(title='Select output directory')
+        if directory:
+            self.output_dir_var.set(directory)
+
+    def create_template(self):
+        file_path = filedialog.asksaveasfilename(
+            title='Create starter workbook',
+            defaultextension='.xlsx',
+            initialfile=DEFAULT_TEMPLATE_NAME,
+            filetypes=[('Excel Workbook', '*.xlsx')],
+        )
+        if not file_path:
+            return
+
+        try:
+            create_template_workbook(file_path)
+        except Exception as exc:
+            messagebox.showerror('Template Error', str(exc))
+            return
+
+        self.input_path_var.set(file_path)
+        self.append_log(f'Created workbook template: {file_path}')
+        self.status_var.set('Workbook template created. You can edit it and run the simulation.')
+
+    def start_run(self):
+        input_path = self.input_path_var.get().strip()
+        output_dir = self.output_dir_var.get().strip()
+        if not input_path:
+            messagebox.showerror('Missing Input', 'Select an Excel workbook before running the simulation.')
+            return
+        if not output_dir:
+            messagebox.showerror('Missing Output Directory', 'Select an output directory before running the simulation.')
+            return
+        if self.worker_thread is not None and self.worker_thread.is_alive():
+            return
+
+        self.run_button.configure(state='disabled')
+        self.progress_var.set(0.0)
+        self.status_var.set('Loading workbook...')
+        self.clear_previews()
+        self.append_log(f'Loading workbook: {input_path}')
+        self.append_log(f'Output directory: {output_dir}')
+
+        self.worker_thread = threading.Thread(
+            target=self._run_worker,
+            args=(input_path, output_dir),
+            daemon=True,
+        )
+        self.worker_thread.start()
+
+    def _run_worker(self, input_path: str, output_dir: str):
+        try:
+            config = load_config_from_workbook(input_path)
+            self.message_queue.put({'type': 'log', 'text': f'Loaded workbook: {input_path}'})
+            result = run_application(
+                config,
+                output_dir,
+                progress_callback=lambda payload: self.message_queue.put({'type': 'progress', 'payload': payload}),
+                log_callback=lambda text: self.message_queue.put({'type': 'log', 'text': text}),
+            )
+            self.message_queue.put({'type': 'done', 'result': result})
+        except Exception as exc:
+            self.message_queue.put({
+                'type': 'error',
+                'message': str(exc),
+                'details': traceback.format_exc(),
+            })
+
+    def process_queue(self):
+        while True:
+            try:
+                item = self.message_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            item_type = item['type']
+            if item_type == 'log':
+                self.append_log(item['text'])
+            elif item_type == 'progress':
+                payload = item['payload']
+                self.status_var.set(payload.get('message', 'Running simulation...'))
+                self.progress_var.set(float(payload.get('progress', 0.0)) * 100)
+            elif item_type == 'done':
+                self.run_button.configure(state='normal')
+                self.progress_var.set(100.0)
+                self.status_var.set(f"Completed. Outputs saved to {item['result']['output_dir']}")
+                self.append_log(f"Outputs saved to {item['result']['output_dir']}")
+                self.show_output_previews(item['result'])
+            elif item_type == 'error':
+                self.run_button.configure(state='normal')
+                self.status_var.set('Simulation failed. Check the log for details.')
+                self.append_log(item['details'])
+                messagebox.showerror('Simulation Error', item['message'])
+
+        self.root.after(100, self.process_queue)
+
+    def append_log(self, text: str):
+        self.log_text.configure(state='normal')
+        self.log_text.insert('end', text.rstrip() + '\n')
+        self.log_text.see('end')
+        self.log_text.configure(state='disabled')
+
+    def clear_previews(self):
+        self.preview_images.clear()
+        for tab_id in self.preview_notebook.tabs():
+            self.preview_notebook.forget(tab_id)
+        self.show_placeholder_preview('Run the simulation to preview the generated charts here.')
+
+    def show_placeholder_preview(self, message: str):
+        placeholder = ttk.Frame(self.preview_notebook)
+        ttk.Label(placeholder, text=message, anchor='center', justify='center').pack(fill='both', expand=True, padx=16, pady=16)
+        self.preview_notebook.add(placeholder, text='Preview')
+
+    def show_output_previews(self, result: Dict[str, object]):
+        for tab_id in self.preview_notebook.tabs():
+            self.preview_notebook.forget(tab_id)
+        self.preview_images.clear()
+
+        summary_tab = ttk.Frame(self.preview_notebook)
+        summary_text = scrolledtext.ScrolledText(summary_tab, wrap='word', height=18)
+        summary_text.pack(fill='both', expand=True)
+        summary_text.insert('1.0', result['summary_text'])
+        summary_text.configure(state='disabled')
+        self.preview_notebook.add(summary_tab, text='Summary')
+
+        tab_titles = {
+            'scatter': '3D Scatter',
+            'bars': 'Bar Charts',
+            'heatmap': 'Heatmap',
+            'infographic': 'Infographic',
+        }
+        for key in ['scatter', 'bars', 'heatmap', 'infographic']:
+            image_path = FilePath(result['output_files'][key])
+            if not image_path.exists():
+                continue
+
+            tab = ttk.Frame(self.preview_notebook)
+            with Image.open(image_path) as image:
+                pil_image = image.copy()
+            pil_image.thumbnail((980, 680))
+            photo = ImageTk.PhotoImage(pil_image)
+            self.preview_images[key] = photo
+
+            ttk.Label(tab, image=photo).pack(fill='both', expand=True, padx=12, pady=(12, 6))
+            ttk.Label(tab, text=str(image_path)).pack(anchor='w', padx=12, pady=(0, 12))
+            self.preview_notebook.add(tab, text=tab_titles[key])
+
+
+def launch_ui():
+    """Start the desktop application."""
+    root = tk.Tk()
+    PollutionParticleApp(root)
+    root.mainloop()
+
+
+def parse_args(argv: Optional[List[str]] = None):
+    """Parse CLI arguments for workbook, template, and UI modes."""
+    parser = argparse.ArgumentParser(description='PM deposition simulation with XLSX input and desktop UI.')
+    parser.add_argument('--ui', action='store_true', help='Launch the desktop UI.')
+    parser.add_argument('--xlsx', help='Path to the simulation workbook (.xlsx).')
+    parser.add_argument('--output-dir', default='.', help='Directory for generated outputs.')
+    parser.add_argument(
+        '--generate-template',
+        nargs='?',
+        const=DEFAULT_TEMPLATE_NAME,
+        help='Write a starter workbook and optionally choose the destination path.',
+    )
+    parser.add_argument(
+        '--run-defaults',
+        action='store_true',
+        help='Run the simulation with the built-in default data instead of loading a workbook.',
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None):
+    """Entry point for CLI and desktop usage."""
+    args = parse_args(argv)
+
+    if args.generate_template is not None:
+        template_path = FilePath(args.generate_template)
+        create_template_workbook(template_path)
+        emit_log(f'Created workbook template: {template_path.resolve()}')
+        if not args.ui and not args.xlsx and not args.run_defaults:
+            return {'template': str(template_path.resolve())}
+
+    if args.ui or (not args.xlsx and not args.run_defaults):
+        launch_ui()
+        return None
+
+    if args.run_defaults:
+        config = get_default_config()
+    else:
+        config = load_config_from_workbook(args.xlsx)
+    return run_application(config, args.output_dir)
 
 
 if __name__ == '__main__':
-    results = main()
+    main()
