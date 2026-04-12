@@ -969,6 +969,13 @@ def generate_lung_infographic(
     dep_rng = np.random.default_rng(99)
     spot_cmap = plt.cm.hot_r  # warm colours for deposited particles
 
+    # Build Path objects from lung silhouettes for accurate containment checks
+    left_lung_path = Path(ll, lc)
+    right_lung_path = Path(rl, rc)
+
+    def _inside_lungs(px, py):
+        return left_lung_path.contains_point((px, py)) or right_lung_path.contains_point((px, py))
+
     # --- ET region spots (nasal/pharynx area) ---
     n_et = max(3, int(et_dep * 0.6))
     for _ in range(n_et):
@@ -984,13 +991,8 @@ def generate_lung_infographic(
     for _ in range(n_tb):
         sx = dep_rng.uniform(1.5, 8.5)
         sy = dep_rng.uniform(5.0, 9.5)
-        # keep within lung outlines roughly
-        if sx < 5:
-            if sx < 0.5 or sx > 4.2:
-                continue
-        else:
-            if sx > 9.5 or sx < 5.8:
-                continue
+        if not _inside_lungs(sx, sy):
+            continue
         sr = dep_rng.uniform(0.05, 0.12)
         ax_lung.add_patch(Ellipse((sx, sy), sr * 2, sr * 2,
                                    facecolor='#c0392b', edgecolor='none',
@@ -1001,13 +1003,8 @@ def generate_lung_infographic(
     for _ in range(n_al):
         sx = dep_rng.uniform(0.6, 9.4)
         sy = dep_rng.uniform(1.2, 5.0)
-        # keep within lung silhouettes
-        if sx < 5:
-            if sx < 0.4 or sx > 4.1:
-                continue
-        else:
-            if sx > 9.6 or sx < 5.9:
-                continue
+        if not _inside_lungs(sx, sy):
+            continue
         sr = dep_rng.uniform(0.06, 0.14)
         ax_lung.add_patch(Ellipse((sx, sy), sr * 2, sr * 2,
                                    facecolor='#922b21', edgecolor='none',
@@ -1047,7 +1044,7 @@ def generate_lung_infographic(
     # ----------------------------------------------------------------
     # RIGHT PANEL — Data bars + comparison across all PM sizes
     # ----------------------------------------------------------------
-    ax_bar = fig.add_axes([0.58, 0.42, 0.38, 0.45])
+    ax_bar = fig.add_axes([0.58, 0.46, 0.38, 0.42])
 
     regions_display = ['Extra-thoracic', 'Conducting\n(Tubular)', 'Alveolar']
     dep_values = [et_dep, tb_dep, al_dep]
@@ -1070,17 +1067,17 @@ def generate_lung_infographic(
     ax_bar.tick_params(labelsize=10)
     ax_bar.grid(axis='x', alpha=0.3)
 
-    # Total deposition badge
-    ax_bar.text(max(dep_values) * 0.55, -0.7,
+    # Total deposition badge (placed below xlabel using axes transform)
+    ax_bar.text(0.5, -0.28,
                 f'Total Deposition: {total_dep:.1f}%',
                 fontsize=12, fontweight='bold', color='white',
                 bbox=dict(boxstyle='round,pad=0.4', facecolor='#e74c3c', alpha=0.9),
-                ha='center')
+                ha='center', transform=ax_bar.transAxes)
 
     # ----------------------------------------------------------------
     # BOTTOM RIGHT — Small multi-PM comparison table
     # ----------------------------------------------------------------
-    ax_table = fig.add_axes([0.58, 0.06, 0.38, 0.30])
+    ax_table = fig.add_axes([0.58, 0.04, 0.38, 0.26])
     ax_table.axis('off')
     ax_table.set_title('Deposition Across All PM Sizes',
                        fontsize=12, fontweight='bold', color='#2c3e50', pad=8)
