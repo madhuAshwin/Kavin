@@ -785,6 +785,13 @@ def generate_lung_infographic(
         _draw_tree(ex, ey, angle + spread, nl, nw, depth + 1, max_depth)
 
     # ======== LUNG SILHOUETTES (background, zorder=1) ========
+    # Diaphragm sweeping curve under the lungs for realism
+    diaph_v = [(-0.5, 0.0), (1.0, 1.2), (4.5, 1.1), (5.0, 0.8), (5.5, 1.1), (9.0, 1.2), (10.5, 0.0)]
+    diaph_c = [Path.MOVETO, Path.CURVE4, Path.CURVE4, Path.CURVE4, Path.CURVE4, Path.CURVE4, Path.CURVE4]
+    ax_lung.add_patch(PathPatch(Path(diaph_v, diaph_c), facecolor='none', edgecolor='#d35400', linewidth=3, alpha=0.4, zorder=0))
+    ax_lung.text(10.2, 0.4, 'Diaphragm', ha='right', va='center',
+                 fontsize=7.5, fontweight='bold', color='#d35400', alpha=0.7, zorder=0)
+
     # Left lung — 2 lobes with cardiac notch (7 cubic Bézier segments)
     ll = [
         (4.0, 9.0),
@@ -829,44 +836,91 @@ def generate_lung_infographic(
                  linestyle='--', alpha=0.45, zorder=2)
 
     # ======== TRACHEA ========
-    trach_cx, trach_cy, trach_w, trach_h = 5.0, 10.65, 1.0, 2.2
+    trach_cx, trach_cy, trach_w, trach_h = 5.0, 10.4, 1.0, 2.0
+    # Trachea tube
     ax_lung.add_patch(FancyBboxPatch(
         (trach_cx - trach_w / 2, trach_cy - trach_h / 2), trach_w, trach_h,
-        boxstyle="round,pad=0.18", facecolor=tb_color, edgecolor=airway_wall,
+        boxstyle="round,pad=0.1", facecolor=tb_color, edgecolor=airway_wall,
         linewidth=1.8, alpha=0.92, zorder=6))
-    for ry in np.linspace(trach_cy - trach_h / 2 + 0.28,
-                          trach_cy + trach_h / 2 - 0.28, 6):
-        ax_lung.add_patch(Arc((trach_cx, ry), trach_w * 0.65, 0.22, angle=0,
-                              theta1=200, theta2=340, color=cartilage_c,
-                              linewidth=2, alpha=0.7, zorder=7))
-    ax_lung.text(trach_cx, trach_cy, 'Trachea', ha='center', va='center',
-                 fontsize=7.5, fontweight='bold', color='white', zorder=8)
+    
+    # Improved 3D-looking cartilage rings
+    for ry in np.linspace(trach_cy - trach_h / 2 + 0.15,
+                          trach_cy + trach_h / 2 - 0.15, 8):
+        ax_lung.add_patch(Arc((trach_cx, ry), trach_w * 0.9, 0.25, angle=0,
+                              theta1=180, theta2=360, color=cartilage_c,
+                              linewidth=2.5, alpha=0.9, zorder=7))
+        ax_lung.add_patch(Arc((trach_cx, ry - 0.05), trach_w * 0.9, 0.25, angle=0,
+                              theta1=180, theta2=360, color='white',
+                              linewidth=1, alpha=0.4, zorder=7)) # highlight
+    
+    ax_lung.text(6.1, 10.4, 'Trachea', ha='left', va='center',
+                 fontsize=8.5, fontweight='bold', color='#2c3e50', zorder=8)
 
     # ======== PHARYNX / LARYNX ========
-    ax_lung.add_patch(FancyBboxPatch(
-        (4.35, 11.9), 1.3, 1.1, boxstyle="round,pad=0.15",
-        facecolor=et_color, edgecolor=airway_wall, linewidth=1.5, alpha=0.9, zorder=6))
-    ax_lung.text(5, 12.45, 'Pharynx\n& Larynx', ha='center', va='center',
-                 fontsize=7, fontweight='bold', color='#2c3e50', zorder=8)
-    conn_top = trach_cy + trach_h / 2
-    ax_lung.plot([5, 5], [11.9, conn_top], color=airway_wall, linewidth=4,
-                 solid_capstyle='round', zorder=5)
-    ax_lung.plot([5, 5], [11.9, conn_top], color=mucosa_c, linewidth=1.8,
-                 solid_capstyle='round', alpha=0.45, zorder=5)
+    # More realistic sweeping shape for larynx (thyroid cartilage / funnel)
+    larynx_verts = [
+        (4.4, 11.5),   # bottom left (connects to trachea)
+        (4.1, 12.2),   # flare out left
+        (4.2, 12.8),   # straight left pharynx
+        (4.3, 13.4),   # curve towards nasal
+        (5.7, 13.4),   # across to right nasal
+        (5.8, 12.8),   # straight right pharynx
+        (5.9, 12.2),   # flare out right
+        (5.6, 11.5),   # bottom right
+        (4.4, 11.5)    # close
+    ]
+    larynx_codes = [Path.MOVETO, Path.CURVE4, Path.CURVE4, Path.CURVE4, 
+                    Path.LINETO, Path.CURVE4, Path.CURVE4, Path.CURVE4, Path.CLOSEPOLY]
+    # Smooth the path with Spline-like bezier for realism
+    ax_lung.add_patch(PathPatch(Path(larynx_verts, larynx_codes), facecolor=et_color,
+                                edgecolor=airway_wall, linewidth=1.8, alpha=0.9, zorder=5))
+    
+    # Anatomical Larynx lines (Thyroid cartilage & Cricoid)
+    ax_lung.plot([4.6, 5.0, 5.4], [11.8, 11.6, 11.8], color=airway_wall, linewidth=1.5, alpha=0.6, zorder=6) # Cricoid
+    ax_lung.plot([4.3, 5.0, 5.7], [12.2, 11.9, 12.2], color=airway_wall, linewidth=1.5, alpha=0.6, zorder=6) # Thyroid base
+    ax_lung.plot([5.0, 5.0], [11.9, 12.5], color=airway_wall, linewidth=1.5, alpha=0.6, zorder=6) # Prominence line
+    
+    ax_lung.text(6.1, 12.0, 'Larynx', ha='left', va='center',
+                 fontsize=8.0, fontweight='bold', color='#2c3e50', zorder=8)
+    ax_lung.text(6.1, 12.8, 'Pharynx', ha='left', va='center',
+                 fontsize=8.0, fontweight='bold', color='#2c3e50', zorder=8)
 
-    # ======== NASAL CAVITY (anatomical nose with septum & turbinates) ========
-    # Outer nose silhouette — bridge, tip, nostrils, base
+    # ======== CONTINUOUS BRONCHIAL TREE (Upper parts of lungs connected to Trachea) ========
+    # We replace the hardcoded square carina connection with a realistic split
+    carina_y = trach_cy - trach_h / 2
+    # Left main bronchus curve
+    l_bronchus = [(5.0, carina_y), (4.7, carina_y - 0.4), (3.8, carina_y - 0.8), (3.3, carina_y - 1.2)]
+    ax_lung.add_patch(PathPatch(Path(l_bronchus, [Path.MOVETO, Path.CURVE4, Path.CURVE4, Path.CURVE4]), 
+                                facecolor='none', edgecolor=tb_color, linewidth=18, 
+                                capstyle='round', alpha=0.92, zorder=5))
+    # Right main bronchus curve (steeper, wider anatomically)
+    r_bronchus = [(5.0, carina_y), (5.4, carina_y - 0.3), (6.2, carina_y - 0.9), (6.7, carina_y - 1.4)]
+    ax_lung.add_patch(PathPatch(Path(r_bronchus, [Path.MOVETO, Path.CURVE4, Path.CURVE4, Path.CURVE4]), 
+                                facecolor='none', edgecolor=tb_color, linewidth=22, 
+                                capstyle='round', alpha=0.92, zorder=5))
+    
+    # Add cartilage rings to main bronchi
+    for t in np.linspace(0.2, 0.8, 4):
+        lx, ly = 5.0*(1-t)**3 + 3*4.7*t*(1-t)**2 + 3*3.8*t**2*(1-t) + 3.3*t**3, carina_y*(1-t)**3 + 3*(carina_y-0.4)*t*(1-t)**2 + 3*(carina_y-0.8)*t**2*(1-t) + (carina_y-1.2)*t**3
+        rx, ry = 5.0*(1-t)**3 + 3*5.4*t*(1-t)**2 + 3*6.2*t**2*(1-t) + 6.7*t**3, carina_y*(1-t)**3 + 3*(carina_y-0.3)*t*(1-t)**2 + 3*(carina_y-0.9)*t**2*(1-t) + (carina_y-1.4)*t**3
+        # Left rings
+        ax_lung.add_patch(Arc((lx, ly), 0.7, 0.2, angle=30, theta1=180, theta2=360, color=cartilage_c, linewidth=2, alpha=0.8, zorder=6))
+        # Right rings
+        ax_lung.add_patch(Arc((rx, ry), 0.85, 0.25, angle=-35, theta1=180, theta2=360, color=cartilage_c, linewidth=2, alpha=0.8, zorder=6))
+
+    # ======== NASAL CAVITY (anatomical coronal section) ========
+    # Smooth, realistic nasal cavity silhouette replacing the "external nose"
     nose_outer = [
-        (5.0, 14.55),                                          # top of bridge
-        (4.65, 14.5), (4.35, 14.2), (4.2, 13.85),            # left bridge curve
-        (4.1, 13.55), (4.05, 13.25), (4.15, 13.05),          # left side down
-        (4.3, 12.85), (4.55, 12.8), (4.65, 13.0),            # left nostril notch
-        (4.75, 13.15), (4.9, 13.15), (5.0, 13.05),           # septum dip
-        (5.1, 13.15), (5.25, 13.15), (5.35, 13.0),           # right nostril notch
-        (5.45, 12.8), (5.7, 12.85), (5.85, 13.05),           # right side
-        (5.95, 13.25), (5.9, 13.55), (5.8, 13.85),           # right side up
-        (5.65, 14.2), (5.35, 14.5), (5.0, 14.55),            # right bridge
-        (5.0, 14.55),
+        (5.0, 14.8),                                         # Septum top
+        (4.5, 14.8), (4.2, 14.5), (4.1, 14.1),               # left roof and lateral wall
+        (4.1, 13.8), (4.3, 13.5), (4.4, 13.4),               # left curve in
+        (4.3, 13.3), (4.5, 13.2), (4.6, 13.3),               # left lowest turbinate curve (bottom)
+        (4.8, 13.4), (4.9, 13.4), (5.0, 13.4),               # meet septum base
+        (5.1, 13.4), (5.2, 13.4), (5.4, 13.3),               # right septum base
+        (5.5, 13.2), (5.7, 13.3), (5.6, 13.4),               # right lowest turbinate curve (bottom)
+        (5.7, 13.5), (5.9, 13.8), (5.9, 14.1),               # right lateral wall
+        (5.8, 14.5), (5.5, 14.8), (5.0, 14.8),               # right roof to septum
+        (5.0, 14.8),
     ]
     nose_codes = [Path.MOVETO] + [Path.CURVE4] * 24 + [Path.CLOSEPOLY]
     ax_lung.add_patch(PathPatch(Path(nose_outer, nose_codes), facecolor=et_color,
@@ -889,24 +943,15 @@ def generate_lung_infographic(
                                edgecolor='none', alpha=0.55, zorder=7))
     ax_lung.add_patch(Ellipse((5.35, 12.95), 0.18, 0.12, facecolor='#2c3e50',
                                edgecolor='none', alpha=0.55, zorder=7))
-    ax_lung.text(5, 13.75, 'Nasal', ha='center', va='center',
+    ax_lung.text(5, 14.15, 'Nasal', ha='center', va='center',
                  fontsize=6.5, fontweight='bold', color='#2c3e50', zorder=8)
-    ax_lung.text(5, 13.55, 'Cavity', ha='center', va='center',
+    ax_lung.text(5, 13.95, 'Cavity', ha='center', va='center',
                  fontsize=6.5, fontweight='bold', color='#2c3e50', zorder=8)
-
-    # ======== MAIN BRONCHI (carina) ========
-    carina_y = trach_cy - trach_h / 2
-    for bx, sign in [(3.4, -1), (6.6, 1)]:
-        xs = [5.0, 5.0 + sign * 0.6, bx]
-        ys = [carina_y, carina_y - 0.5, carina_y - 1.0]
-        ax_lung.plot(xs, ys, color=tb_color, linewidth=5, solid_capstyle='round',
-                     alpha=0.9, zorder=4)
-        ax_lung.plot(xs, ys, color=mucosa_c, linewidth=1.6, solid_capstyle='round',
-                     alpha=0.3, zorder=5)
 
     # ======== BRONCHIAL TREES ========
-    _draw_tree(3.4, carina_y - 1.0, -15, 1.5, 3.2, 0, 5)
-    _draw_tree(6.6, carina_y - 1.0,  15, 1.5, 3.2, 0, 5)
+    # Start trees from the ends of the new main bronchi we drew
+    _draw_tree(3.3, carina_y - 1.2, -15, 1.5, 3.2, 0, 5)
+    _draw_tree(6.7, carina_y - 1.4,  15, 1.5, 3.2, 0, 5)
 
     # ======== ALVEOLAR CLUSTERS ========
     for (acx, acy) in alveoli_positions:
