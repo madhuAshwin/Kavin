@@ -661,19 +661,44 @@ def generate_lung_infographic(results: Dict, age_label: str,
     ax_lung.plot([5, 5], [11.9, conn_top], color=mucosa_c, linewidth=1.8,
                  solid_capstyle='round', alpha=0.45, zorder=5)
 
-    # ======== NASAL CAVITY ========
-    nose_v = [
-        (5.0, 14.1),
-        (4.45, 13.95), (4.15, 13.45), (4.25, 13.0),
-        (4.4, 12.65), (4.75, 12.55), (5.0, 13.0),
-        (5.25, 12.55), (5.6, 12.65), (5.75, 13.0),
-        (5.85, 13.45), (5.55, 13.95), (5.0, 14.1),
-        (5.0, 14.1),
+    # ======== NASAL CAVITY (anatomical nose with septum & turbinates) ========
+    # Outer nose silhouette — bridge, tip, nostrils, base
+    nose_outer = [
+        (5.0, 14.55),                                          # top of bridge
+        (4.65, 14.5), (4.35, 14.2), (4.2, 13.85),            # left bridge curve
+        (4.1, 13.55), (4.05, 13.25), (4.15, 13.05),          # left side down
+        (4.3, 12.85), (4.55, 12.8), (4.65, 13.0),            # left nostril notch
+        (4.75, 13.15), (4.9, 13.15), (5.0, 13.05),           # septum dip
+        (5.1, 13.15), (5.25, 13.15), (5.35, 13.0),           # right nostril notch
+        (5.45, 12.8), (5.7, 12.85), (5.85, 13.05),           # right side
+        (5.95, 13.25), (5.9, 13.55), (5.8, 13.85),           # right side up
+        (5.65, 14.2), (5.35, 14.5), (5.0, 14.55),            # right bridge
+        (5.0, 14.55),
     ]
-    nc = [Path.MOVETO] + [Path.CURVE4] * 12 + [Path.CLOSEPOLY]
-    ax_lung.add_patch(PathPatch(Path(nose_v, nc), facecolor=et_color,
-                                edgecolor=airway_wall, linewidth=1.5, alpha=0.9, zorder=6))
-    ax_lung.text(5, 13.45, 'Nasal\nCavity', ha='center', va='center',
+    nose_codes = [Path.MOVETO] + [Path.CURVE4] * 24 + [Path.CLOSEPOLY]
+    ax_lung.add_patch(PathPatch(Path(nose_outer, nose_codes), facecolor=et_color,
+                                edgecolor=airway_wall, linewidth=1.8, alpha=0.9, zorder=6))
+    # Nasal septum (vertical midline)
+    ax_lung.plot([5.0, 5.0], [14.35, 13.1], color=airway_wall,
+                 linewidth=1.2, alpha=0.5, zorder=7)
+    # Turbinate ridges (three curved shelves per side)
+    for ty, tw in [(14.05, 0.28), (13.7, 0.35), (13.35, 0.30)]:
+        # left turbinate
+        ax_lung.add_patch(Arc((4.65, ty), tw, 0.12, angle=0,
+                              theta1=180, theta2=360, color='#d98880',
+                              linewidth=1.6, alpha=0.6, zorder=7))
+        # right turbinate
+        ax_lung.add_patch(Arc((5.35, ty), tw, 0.12, angle=0,
+                              theta1=180, theta2=360, color='#d98880',
+                              linewidth=1.6, alpha=0.6, zorder=7))
+    # Nostril openings
+    ax_lung.add_patch(Ellipse((4.65, 12.95), 0.18, 0.12, facecolor='#2c3e50',
+                               edgecolor='none', alpha=0.55, zorder=7))
+    ax_lung.add_patch(Ellipse((5.35, 12.95), 0.18, 0.12, facecolor='#2c3e50',
+                               edgecolor='none', alpha=0.55, zorder=7))
+    ax_lung.text(5, 13.75, 'Nasal', ha='center', va='center',
+                 fontsize=6.5, fontweight='bold', color='#2c3e50', zorder=8)
+    ax_lung.text(5, 13.55, 'Cavity', ha='center', va='center',
                  fontsize=6.5, fontweight='bold', color='#2c3e50', zorder=8)
 
     # ======== MAIN BRONCHI (carina) ========
@@ -701,6 +726,62 @@ def generate_lung_infographic(results: Dict, age_label: str,
                                        facecolor=al_color, edgecolor='#c0392b',
                                        linewidth=0.4, alpha=0.65, zorder=3))
 
+    # ======== PM DEPOSITION SPOTS ========
+    # Scatter coloured dots proportional to deposition in each region
+    dep_rng = np.random.default_rng(99)
+    spot_cmap = plt.cm.hot_r  # warm colours for deposited particles
+
+    # --- ET region spots (nasal/pharynx area) ---
+    n_et = max(3, int(et_dep * 0.6))
+    for _ in range(n_et):
+        sx = dep_rng.uniform(4.25, 5.75)
+        sy = dep_rng.uniform(12.9, 14.3)
+        sr = dep_rng.uniform(0.04, 0.09)
+        ax_lung.add_patch(Ellipse((sx, sy), sr * 2, sr * 2,
+                                   facecolor='#e74c3c', edgecolor='none',
+                                   alpha=0.75, zorder=9))
+
+    # --- Tubular region spots (trachea & bronchi) ---
+    n_tb = max(5, int(tb_dep * 0.5))
+    for _ in range(n_tb):
+        sx = dep_rng.uniform(1.5, 8.5)
+        sy = dep_rng.uniform(5.0, 9.5)
+        # keep within lung outlines roughly
+        if sx < 5:
+            if sx < 0.5 or sx > 4.2:
+                continue
+        else:
+            if sx > 9.5 or sx < 5.8:
+                continue
+        sr = dep_rng.uniform(0.05, 0.12)
+        ax_lung.add_patch(Ellipse((sx, sy), sr * 2, sr * 2,
+                                   facecolor='#c0392b', edgecolor='none',
+                                   alpha=0.7, zorder=9))
+
+    # --- Alveolar region spots (lower lung periphery) ---
+    n_al = max(3, int(al_dep * 0.8))
+    for _ in range(n_al):
+        sx = dep_rng.uniform(0.6, 9.4)
+        sy = dep_rng.uniform(1.2, 5.0)
+        # keep within lung silhouettes
+        if sx < 5:
+            if sx < 0.4 or sx > 4.1:
+                continue
+        else:
+            if sx > 9.6 or sx < 5.9:
+                continue
+        sr = dep_rng.uniform(0.06, 0.14)
+        ax_lung.add_patch(Ellipse((sx, sy), sr * 2, sr * 2,
+                                   facecolor='#922b21', edgecolor='none',
+                                   alpha=0.65, zorder=9))
+
+    # Deposition legend
+    ax_lung.scatter([], [], c='#e74c3c', s=30, label=f'ET deposit ({et_dep:.1f}%)')
+    ax_lung.scatter([], [], c='#c0392b', s=30, label=f'Tubular deposit ({tb_dep:.1f}%)')
+    ax_lung.scatter([], [], c='#922b21', s=30, label=f'Alveolar deposit ({al_dep:.1f}%)')
+    ax_lung.legend(loc='lower right', fontsize=7.5, framealpha=0.9,
+                   edgecolor='#bdc3c7', fancybox=True, handletextpad=0.4)
+
     # ======== REGION LABELS ========
     ax_lung.annotate('EXTRA-THORACIC\nREGION', xy=(4.2, 13.2), xytext=(0.5, 13.8),
                      fontsize=9, fontweight='bold', color='#d35400',
@@ -719,10 +800,10 @@ def generate_lung_infographic(results: Dict, age_label: str,
                                edgecolor='#c0392b', alpha=0.9), zorder=10)
 
     # Airflow arrow
-    ax_lung.annotate('', xy=(5, 14.2), xytext=(5, 15.0),
+    ax_lung.annotate('', xy=(5, 14.6), xytext=(5, 15.2),
                      arrowprops=dict(arrowstyle='->', color='#3498db', lw=2.5),
                      zorder=10)
-    ax_lung.text(5, 15.1, 'Inhaled Air + PM', ha='center', va='bottom',
+    ax_lung.text(5, 15.3, 'Inhaled Air + PM', ha='center', va='bottom',
                  fontsize=9, color='#3498db', fontweight='bold', zorder=10)
 
     # ----------------------------------------------------------------
