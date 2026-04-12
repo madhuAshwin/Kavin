@@ -14,6 +14,8 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.patches import FancyBboxPatch, Ellipse, Arc, PathPatch, FancyArrowPatch
+from matplotlib.path import Path
 from mpl_toolkits.mplot3d import Axes3D
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
@@ -520,6 +522,288 @@ def generate_heatmap(results: Dict, age_label: str, save_path: str = 'pm_heatmap
 
 
 # ============================================================================
+# LUNG INFOGRAPHIC — ANNOTATED ANATOMICAL PANEL
+# ============================================================================
+
+def generate_lung_infographic(results: Dict, age_label: str,
+                              pm_size: float = 2.5,
+                              save_path: str = 'pm_lung_infographic.png'):
+    """
+    Generate an annotated lung infographic showing PM deposition by region.
+    Left panel: stylized anatomical lung diagram with color-coded regions.
+    Right panel: horizontal bar chart of deposition fractions.
+    """
+    et_dep = results[pm_size]['Extra-thoracic'][0]
+    tb_dep = results[pm_size]['Conducting (Tubular)'][0]
+    al_dep = results[pm_size]['Alveolar'][0]
+    total_dep = et_dep + tb_dep + al_dep
+
+    # Color palette — darker = higher deposition
+    cmap = plt.cm.YlOrRd
+    max_dep = max(et_dep, tb_dep, al_dep)
+    et_color = cmap(et_dep / max_dep * 0.85 + 0.1)
+    tb_color = cmap(tb_dep / max_dep * 0.85 + 0.1)
+    al_color = cmap(al_dep / max_dep * 0.85 + 0.1)
+
+    fig = plt.figure(figsize=(18, 11), facecolor='#f8f9fa')
+    fig.suptitle(
+        f'PM {pm_size} µm Deposition in Human Respiratory System — {age_label}',
+        fontsize=17, fontweight='bold', y=0.97, color='#2c3e50'
+    )
+
+    # ----------------------------------------------------------------
+    # LEFT PANEL — Anatomical lung schematic
+    # ----------------------------------------------------------------
+    ax_lung = fig.add_axes([0.02, 0.05, 0.52, 0.85])
+    ax_lung.set_xlim(-0.5, 10.5)
+    ax_lung.set_ylim(-0.5, 15.5)
+    ax_lung.set_aspect('equal')
+    ax_lung.axis('off')
+
+    # Anatomical colour palette
+    lung_fill = '#fadbd8'
+    lung_fill2 = '#f5b7b1'
+    lung_edge = '#943126'
+    airway_wall = '#a93226'
+    cartilage_c = '#d5dbdb'
+    mucosa_c = '#f1948a'
+
+    rng = np.random.default_rng(42)
+    alveoli_positions = []
+
+    # ---- Helper: recursive bronchial tree ----
+    def _draw_tree(x, y, angle, length, width, depth, max_depth):
+        if depth > max_depth or width < 0.15:
+            alveoli_positions.append((x, y))
+            return
+        rad = np.radians(angle)
+        ex = x + length * np.sin(rad)
+        ey = y - length * np.cos(rad)
+        ax_lung.plot([x, ex], [y, ey], color=tb_color,
+                     linewidth=width, solid_capstyle='round', alpha=0.9, zorder=4)
+        if width > 1.0:
+            ax_lung.plot([x, ex], [y, ey], color=mucosa_c,
+                         linewidth=width * 0.35, solid_capstyle='round',
+                         alpha=0.35, zorder=5)
+        spread = max(10, 28 - depth * 3 + rng.uniform(-4, 4))
+        nl = length * (0.72 + rng.uniform(-0.04, 0.04))
+        nw = width * 0.62
+        _draw_tree(ex, ey, angle - spread, nl, nw, depth + 1, max_depth)
+        _draw_tree(ex, ey, angle + spread, nl, nw, depth + 1, max_depth)
+
+    # ======== LUNG SILHOUETTES (background, zorder=1) ========
+    # Left lung — 2 lobes with cardiac notch (7 cubic Bézier segments)
+    ll = [
+        (4.0, 9.0),
+        (3.2, 9.55), (1.9, 9.45), (1.0, 8.7),
+        (0.4, 7.8), (0.15, 6.5), (0.15, 5.3),
+        (0.15, 3.8), (0.4, 2.3), (1.1, 1.4),
+        (1.9, 0.9), (3.1, 0.9), (3.8, 1.4),
+        (4.15, 2.1), (4.3, 3.4), (4.15, 4.5),
+        (3.85, 5.1), (3.65, 5.55), (3.7, 6.1),
+        (3.85, 6.7), (4.1, 7.8), (4.0, 9.0),
+        (4.0, 9.0),
+    ]
+    lc = [Path.MOVETO] + [Path.CURVE4] * 21 + [Path.CLOSEPOLY]
+    ax_lung.add_patch(PathPatch(Path(ll, lc), facecolor=lung_fill,
+                                edgecolor=lung_edge, linewidth=2.2, alpha=0.85, zorder=1))
+    ax_lung.add_patch(Ellipse((2.0, 5.0), 2.8, 6.0, facecolor=lung_fill2,
+                               edgecolor='none', alpha=0.3, zorder=1))
+
+    # Right lung — 3 lobes, wider (6 cubic Bézier segments)
+    rl = [
+        (6.0, 9.0),
+        (6.8, 9.55), (8.1, 9.45), (9.0, 8.7),
+        (9.6, 7.8), (9.85, 6.5), (9.85, 5.3),
+        (9.85, 3.8), (9.6, 2.3), (8.9, 1.4),
+        (8.1, 0.9), (6.9, 0.9), (6.2, 1.4),
+        (5.85, 2.1), (5.75, 3.5), (5.8, 5.0),
+        (5.8, 6.2), (5.85, 7.8), (6.0, 9.0),
+        (6.0, 9.0),
+    ]
+    rc = [Path.MOVETO] + [Path.CURVE4] * 18 + [Path.CLOSEPOLY]
+    ax_lung.add_patch(PathPatch(Path(rl, rc), facecolor=lung_fill,
+                                edgecolor=lung_edge, linewidth=2.2, alpha=0.85, zorder=1))
+    ax_lung.add_patch(Ellipse((8.0, 5.0), 2.8, 6.0, facecolor=lung_fill2,
+                               edgecolor='none', alpha=0.3, zorder=1))
+
+    # ---- Lobe fissures (dashed lines) ----
+    ax_lung.plot([3.7, 0.7], [8.0, 2.0], color=lung_edge, linewidth=1.2,
+                 linestyle='--', alpha=0.45, zorder=2)
+    ax_lung.plot([6.3, 9.3], [8.0, 2.0], color=lung_edge, linewidth=1.2,
+                 linestyle='--', alpha=0.45, zorder=2)
+    ax_lung.plot([6.0, 9.5], [6.3, 6.3], color=lung_edge, linewidth=1.2,
+                 linestyle='--', alpha=0.45, zorder=2)
+
+    # ======== TRACHEA ========
+    trach_cx, trach_cy, trach_w, trach_h = 5.0, 10.65, 1.0, 2.2
+    ax_lung.add_patch(FancyBboxPatch(
+        (trach_cx - trach_w / 2, trach_cy - trach_h / 2), trach_w, trach_h,
+        boxstyle="round,pad=0.18", facecolor=tb_color, edgecolor=airway_wall,
+        linewidth=1.8, alpha=0.92, zorder=6))
+    for ry in np.linspace(trach_cy - trach_h / 2 + 0.28,
+                          trach_cy + trach_h / 2 - 0.28, 6):
+        ax_lung.add_patch(Arc((trach_cx, ry), trach_w * 0.65, 0.22, angle=0,
+                              theta1=200, theta2=340, color=cartilage_c,
+                              linewidth=2, alpha=0.7, zorder=7))
+    ax_lung.text(trach_cx, trach_cy, 'Trachea', ha='center', va='center',
+                 fontsize=7.5, fontweight='bold', color='white', zorder=8)
+
+    # ======== PHARYNX / LARYNX ========
+    ax_lung.add_patch(FancyBboxPatch(
+        (4.35, 11.9), 1.3, 1.1, boxstyle="round,pad=0.15",
+        facecolor=et_color, edgecolor=airway_wall, linewidth=1.5, alpha=0.9, zorder=6))
+    ax_lung.text(5, 12.45, 'Pharynx\n& Larynx', ha='center', va='center',
+                 fontsize=7, fontweight='bold', color='#2c3e50', zorder=8)
+    conn_top = trach_cy + trach_h / 2
+    ax_lung.plot([5, 5], [11.9, conn_top], color=airway_wall, linewidth=4,
+                 solid_capstyle='round', zorder=5)
+    ax_lung.plot([5, 5], [11.9, conn_top], color=mucosa_c, linewidth=1.8,
+                 solid_capstyle='round', alpha=0.45, zorder=5)
+
+    # ======== NASAL CAVITY ========
+    nose_v = [
+        (5.0, 14.1),
+        (4.45, 13.95), (4.15, 13.45), (4.25, 13.0),
+        (4.4, 12.65), (4.75, 12.55), (5.0, 13.0),
+        (5.25, 12.55), (5.6, 12.65), (5.75, 13.0),
+        (5.85, 13.45), (5.55, 13.95), (5.0, 14.1),
+        (5.0, 14.1),
+    ]
+    nc = [Path.MOVETO] + [Path.CURVE4] * 12 + [Path.CLOSEPOLY]
+    ax_lung.add_patch(PathPatch(Path(nose_v, nc), facecolor=et_color,
+                                edgecolor=airway_wall, linewidth=1.5, alpha=0.9, zorder=6))
+    ax_lung.text(5, 13.45, 'Nasal\nCavity', ha='center', va='center',
+                 fontsize=6.5, fontweight='bold', color='#2c3e50', zorder=8)
+
+    # ======== MAIN BRONCHI (carina) ========
+    carina_y = trach_cy - trach_h / 2
+    for bx, sign in [(3.4, -1), (6.6, 1)]:
+        xs = [5.0, 5.0 + sign * 0.6, bx]
+        ys = [carina_y, carina_y - 0.5, carina_y - 1.0]
+        ax_lung.plot(xs, ys, color=tb_color, linewidth=5, solid_capstyle='round',
+                     alpha=0.9, zorder=4)
+        ax_lung.plot(xs, ys, color=mucosa_c, linewidth=1.6, solid_capstyle='round',
+                     alpha=0.3, zorder=5)
+
+    # ======== BRONCHIAL TREES ========
+    _draw_tree(3.4, carina_y - 1.0, -15, 1.5, 3.2, 0, 5)
+    _draw_tree(6.6, carina_y - 1.0,  15, 1.5, 3.2, 0, 5)
+
+    # ======== ALVEOLAR CLUSTERS ========
+    for (acx, acy) in alveoli_positions:
+        if acx < 0.1 or acx > 9.9 or acy < 0.8 or acy > 8.8:
+            continue
+        for _ in range(rng.integers(4, 8)):
+            dx, dy = rng.uniform(-0.22, 0.22), rng.uniform(-0.22, 0.22)
+            r = rng.uniform(0.07, 0.16)
+            ax_lung.add_patch(Ellipse((acx + dx, acy + dy), r * 2, r * 2,
+                                       facecolor=al_color, edgecolor='#c0392b',
+                                       linewidth=0.4, alpha=0.65, zorder=3))
+
+    # ======== REGION LABELS ========
+    ax_lung.annotate('EXTRA-THORACIC\nREGION', xy=(4.2, 13.2), xytext=(0.5, 13.8),
+                     fontsize=9, fontweight='bold', color='#d35400',
+                     arrowprops=dict(arrowstyle='->', color='#d35400', lw=1.5),
+                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                               edgecolor='#d35400', alpha=0.9), zorder=10)
+    ax_lung.annotate('CONDUCTING\nAIRWAYS', xy=(5.8, 8.5), xytext=(8.2, 11.0),
+                     fontsize=9, fontweight='bold', color='#a93226',
+                     arrowprops=dict(arrowstyle='->', color='#a93226', lw=1.5),
+                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                               edgecolor='#a93226', alpha=0.9), zorder=10)
+    ax_lung.annotate('ALVEOLAR\nREGION', xy=(2.2, 4.0), xytext=(0, 0.5),
+                     fontsize=9, fontweight='bold', color='#c0392b',
+                     arrowprops=dict(arrowstyle='->', color='#c0392b', lw=1.5),
+                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                               edgecolor='#c0392b', alpha=0.9), zorder=10)
+
+    # Airflow arrow
+    ax_lung.annotate('', xy=(5, 14.2), xytext=(5, 15.0),
+                     arrowprops=dict(arrowstyle='->', color='#3498db', lw=2.5),
+                     zorder=10)
+    ax_lung.text(5, 15.1, 'Inhaled Air + PM', ha='center', va='bottom',
+                 fontsize=9, color='#3498db', fontweight='bold', zorder=10)
+
+    # ----------------------------------------------------------------
+    # RIGHT PANEL — Data bars + comparison across all PM sizes
+    # ----------------------------------------------------------------
+    ax_bar = fig.add_axes([0.58, 0.42, 0.38, 0.45])
+
+    regions_display = ['Extra-thoracic', 'Conducting\n(Tubular)', 'Alveolar']
+    dep_values = [et_dep, tb_dep, al_dep]
+    bar_colors = [et_color, tb_color, al_color]
+
+    bars = ax_bar.barh(regions_display, dep_values, color=bar_colors,
+                       edgecolor='#7f8c8d', linewidth=1, height=0.55, alpha=0.9)
+
+    for bar, val in zip(bars, dep_values):
+        ax_bar.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height() / 2,
+                    f'{val:.1f}%', va='center', fontsize=12, fontweight='bold',
+                    color='#2c3e50')
+
+    ax_bar.set_xlim(0, max(dep_values) * 1.2)
+    ax_bar.set_xlabel('Deposition (%)', fontsize=11, color='#2c3e50')
+    ax_bar.set_title(f'Regional Deposition — PM {pm_size} µm',
+                     fontsize=13, fontweight='bold', color='#2c3e50', pad=10)
+    ax_bar.spines['top'].set_visible(False)
+    ax_bar.spines['right'].set_visible(False)
+    ax_bar.tick_params(labelsize=10)
+    ax_bar.grid(axis='x', alpha=0.3)
+
+    # Total deposition badge
+    ax_bar.text(max(dep_values) * 0.55, -0.7,
+                f'Total Deposition: {total_dep:.1f}%',
+                fontsize=12, fontweight='bold', color='white',
+                bbox=dict(boxstyle='round,pad=0.4', facecolor='#e74c3c', alpha=0.9),
+                ha='center')
+
+    # ----------------------------------------------------------------
+    # BOTTOM RIGHT — Small multi-PM comparison table
+    # ----------------------------------------------------------------
+    ax_table = fig.add_axes([0.58, 0.06, 0.38, 0.30])
+    ax_table.axis('off')
+    ax_table.set_title('Deposition Across All PM Sizes',
+                       fontsize=12, fontweight='bold', color='#2c3e50', pad=8)
+
+    col_labels = ['PM (µm)', 'ET (%)', 'Tubular (%)', 'Alveolar (%)', 'Total (%)']
+    table_data = []
+    for pm in PM_SIZES:
+        et = results[pm]['Extra-thoracic'][0]
+        tb = results[pm]['Conducting (Tubular)'][0]
+        al = results[pm]['Alveolar'][0]
+        table_data.append([f'{pm}', f'{et:.1f}', f'{tb:.1f}', f'{al:.1f}',
+                           f'{et + tb + al:.1f}'])
+
+    table = ax_table.table(cellText=table_data, colLabels=col_labels,
+                           loc='center', cellLoc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 1.4)
+
+    # Style header
+    for j in range(len(col_labels)):
+        table[0, j].set_facecolor('#2c3e50')
+        table[0, j].set_text_props(color='white', fontweight='bold')
+
+    # Highlight the selected PM row
+    pm_idx = PM_SIZES.index(pm_size) + 1  # +1 for header
+    for j in range(len(col_labels)):
+        table[pm_idx, j].set_facecolor('#ffeaa7')
+        table[pm_idx, j].set_edgecolor('#f39c12')
+
+    # Alternate row shading
+    for i in range(1, len(PM_SIZES) + 1):
+        if i != pm_idx and i % 2 == 0:
+            for j in range(len(col_labels)):
+                table[i, j].set_facecolor('#f0f0f0')
+
+    plt.savefig(save_path, dpi=180, bbox_inches='tight', facecolor=fig.get_facecolor())
+    plt.close()
+    print(f"  → Saved lung infographic: {save_path}")
+
+
+# ============================================================================
 # RESULTS TABLE
 # ============================================================================
 
@@ -585,6 +869,8 @@ def main():
     generate_3d_scatter(all_age_results[d_key], 'pm_3d_scatter.png')
     generate_deposition_bar_charts(all_age_results, 'pm_deposition_bars.png')
     generate_heatmap(all_age_results[d_key], 'D-Category (21-30 yrs)', 'pm_heatmap.png')
+    generate_lung_infographic(all_age_results[d_key], 'D-Category (21-30 yrs)',
+                              pm_size=2.5, save_path='pm_lung_infographic.png')
 
     print("\n✓ Simulation complete!")
     return all_age_results
