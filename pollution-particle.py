@@ -55,11 +55,13 @@ DEFAULT_AGE_GROUPS = {
 
 DEFAULT_TEMPLATE_NAME = 'pollution_input_template.xlsx'
 OUTPUT_FILENAMES = {
-    'scatter': 'pm_3d_scatter.png',
     'bars': 'pm_deposition_bars.png',
-    'heatmap': 'pm_heatmap.png',
-    'infographic': 'pm_lung_infographic.png',
     'summary': 'pm_results_summary.txt',
+}
+AGE_GROUP_OUTPUT_PATTERNS = {
+    'scatter': 'pm_3d_scatter_{slug}.png',
+    'heatmap': 'pm_heatmap_{slug}.png',
+    'infographic': 'pm_lung_infographic_{slug}.png',
 }
 WORKBOOK_SHEETS = {
     'settings': 'simulation_settings',
@@ -519,6 +521,7 @@ def monte_carlo_formula(n_particles: int, unit_density: float,
 def generate_3d_scatter(
     results: Dict,
     pm_sizes: List[float],
+    age_label: Optional[str] = None,
     save_path: str = 'pm_3d_scatter.png',
     log_callback: Optional[Callable[[str], None]] = None,
 ):
@@ -585,8 +588,10 @@ def generate_3d_scatter(
     ax.set_xlabel('X (mm)', fontsize=10)
     ax.set_ylabel('Y (mm)', fontsize=10)
     ax.set_zlabel('Z (depth, mm)', fontsize=10)
-    ax.set_title('3D Particulate Spread in Alveolar System\n(Monte Carlo Simulation - Multiple Runs)',
-                 fontsize=13, fontweight='bold')
+    title = '3D Particulate Spread in Alveolar System\n(Monte Carlo Simulation - Multiple Runs)'
+    if age_label:
+        title += f'\nAge Group: {age_label}'
+    ax.set_title(title, fontsize=13, fontweight='bold')
     ax.legend(loc='upper left', fontsize=9, markerscale=3)
     ax.view_init(elev=25, azim=45)
 
@@ -1128,6 +1133,13 @@ def format_age_display(age_group: AgeGroupConfig) -> str:
     return age_group.label if 'yr' in age_group.label.lower() else f'{age_group.label} yrs'
 
 
+def slugify_for_filename(value: str) -> str:
+    """Create a filesystem-safe stem from an age-group identifier."""
+    slug = ''.join(character.lower() if character.isalnum() else '_' for character in value.strip())
+    slug = '_'.join(part for part in slug.split('_') if part)
+    return slug or 'age_group'
+
+
 def report_progress(
     progress_callback: Optional[Callable[[Dict[str, object]], None]],
     *,
@@ -1325,7 +1337,11 @@ def run_application(
     runtime_age_groups = config.runtime_age_groups()
     age_keys = list(config.age_groups.keys())
     primary_age_key = get_primary_age_key(config)
-    total_units = len(age_keys) * len(config.pm_sizes) * config.n_particles + len(OUTPUT_FILENAMES)
+    total_units = (
+        len(age_keys) * len(config.pm_sizes) * config.n_particles
+        + len(OUTPUT_FILENAMES)
+        + len(age_keys) * len(AGE_GROUP_OUTPUT_PATTERNS)
+    )
     completed_units = 0
 
     emit_log('=' * 70, log_callback)
@@ -1383,24 +1399,31 @@ def run_application(
         all_age_results[age_key] = results
         completed_units = age_offset + config.n_particles * len(config.pm_sizes)
 
-    primary_age = config.age_groups[primary_age_key]
-    primary_results = all_age_results[primary_age_key]
-    summary_text = render_results_table(primary_results, primary_age_key, config.pm_sizes)
+    summary_sections = []
+    for age_key in age_keys:
+        age_group = config.age_groups[age_key]
+        age_display = format_age_display(age_group)
+        heading = age_key if age_display in age_key else f'{age_key} - {age_display}'
+        summary_sections.append(render_results_table(all_age_results[age_key], heading, config.pm_sizes).strip())
 
     formula_lines = [
         '',
         "> Monte Carlo 8-Hour Exposure Formula (Paper's method):",
         '  Formula: MC = (30 x N x rho) / (TV x BF)',
     ]
-    for particle_count in [250, 1000, 2500]:
-        mc_value = monte_carlo_formula(
-            particle_count,
-            1.0,
-            primary_age.tidal_volume_cm3,
-            primary_age.breathing_freq,
-        )
-        formula_lines.append(f'  N={particle_count:>5} particles -> MC factor = {mc_value:.4f}')
-    full_summary_text = summary_text + '\n'.join(formula_lines) + '\n'
+    for age_key in age_keys:
+        age_group = config.age_groups[age_key]
+        age_display = format_age_display(age_group)
+        formula_lines.append(f'  {age_display}:')
+        for particle_count in [250, 1000, 2500]:
+            mc_value = monte_carlo_formula(
+                particle_count,
+                1.0,
+                age_group.tidal_volume_cm3,
+                age_group.breathing_freq,
+            )
+            formula_lines.append(f'    N={particle_count:>5} particles -> MC factor = {mc_value:.4f}')
+    full_summary_text = '\n\n'.join(summary_sections) + '\n' + '\n'.join(formula_lines) + '\n'
 
     summary_path = output_path / OUTPUT_FILENAMES['summary']
     save_text_file(summary_path, full_summary_text)
@@ -1416,18 +1439,7 @@ def run_application(
 
     emit_log('\n> Generating visualizations...', log_callback)
     output_files = {'summary': str(summary_path)}
-
-    scatter_path = output_path / OUTPUT_FILENAMES['scatter']
-    generate_3d_scatter(primary_results, config.pm_sizes, str(scatter_path), log_callback)
-    output_files['scatter'] = str(scatter_path)
-    completed_units += 1
-    report_progress(
-        progress_callback,
-        stage='outputs',
-        message='Generated 3D scatter plot.',
-        completed_units=completed_units,
-        total_units=total_units,
-    )
+    output_files['age_group_images'] = {}
 
     bars_path = output_path / OUTPUT_FILENAMES['bars']
     generate_deposition_bar_charts(
@@ -1448,36 +1460,63 @@ def run_application(
         total_units=total_units,
     )
 
-    heatmap_path = output_path / OUTPUT_FILENAMES['heatmap']
-    generate_heatmap(primary_results, primary_age_key, config.pm_sizes, str(heatmap_path), log_callback)
-    output_files['heatmap'] = str(heatmap_path)
-    completed_units += 1
-    report_progress(
-        progress_callback,
-        stage='outputs',
-        message='Generated regional heatmap.',
-        completed_units=completed_units,
-        total_units=total_units,
-    )
+    for age_key in age_keys:
+        age_group = config.age_groups[age_key]
+        age_display = format_age_display(age_group)
+        age_results = all_age_results[age_key]
+        age_slug = slugify_for_filename(age_key)
+        age_output_files = {}
 
-    infographic_path = output_path / OUTPUT_FILENAMES['infographic']
-    generate_lung_infographic(
-        primary_results,
-        primary_age_key,
-        config.pm_sizes,
-        pm_size=2.5 if 2.5 in config.pm_sizes else config.pm_sizes[0],
-        save_path=str(infographic_path),
-        log_callback=log_callback,
-    )
-    output_files['infographic'] = str(infographic_path)
-    completed_units += 1
-    report_progress(
-        progress_callback,
-        stage='outputs',
-        message='Generated lung infographic.',
-        completed_units=completed_units,
-        total_units=total_units,
-    )
+        scatter_path = output_path / AGE_GROUP_OUTPUT_PATTERNS['scatter'].format(slug=age_slug)
+        generate_3d_scatter(age_results, config.pm_sizes, age_display, str(scatter_path), log_callback)
+        age_output_files['scatter'] = str(scatter_path)
+        completed_units += 1
+        report_progress(
+            progress_callback,
+            stage='outputs',
+            message=f'Generated 3D scatter plot for {age_display}.',
+            completed_units=completed_units,
+            total_units=total_units,
+        )
+
+        heatmap_path = output_path / AGE_GROUP_OUTPUT_PATTERNS['heatmap'].format(slug=age_slug)
+        generate_heatmap(age_results, age_display, config.pm_sizes, str(heatmap_path), log_callback)
+        age_output_files['heatmap'] = str(heatmap_path)
+        completed_units += 1
+        report_progress(
+            progress_callback,
+            stage='outputs',
+            message=f'Generated heatmap for {age_display}.',
+            completed_units=completed_units,
+            total_units=total_units,
+        )
+
+        infographic_path = output_path / AGE_GROUP_OUTPUT_PATTERNS['infographic'].format(slug=age_slug)
+        generate_lung_infographic(
+            age_results,
+            age_display,
+            config.pm_sizes,
+            pm_size=2.5 if 2.5 in config.pm_sizes else config.pm_sizes[0],
+            save_path=str(infographic_path),
+            log_callback=log_callback,
+        )
+        age_output_files['infographic'] = str(infographic_path)
+        completed_units += 1
+        report_progress(
+            progress_callback,
+            stage='outputs',
+            message=f'Generated lung infographic for {age_display}.',
+            completed_units=completed_units,
+            total_units=total_units,
+        )
+
+        output_files['age_group_images'][age_key] = age_output_files
+
+    primary_outputs = output_files['age_group_images'][primary_age_key]
+    output_files['primary_age_group'] = primary_age_key
+    output_files['scatter'] = primary_outputs['scatter']
+    output_files['heatmap'] = primary_outputs['heatmap']
+    output_files['infographic'] = primary_outputs['infographic']
 
     emit_log('\nSimulation complete!', log_callback)
     report_progress(
@@ -1680,6 +1719,22 @@ class PollutionParticleApp:
         ttk.Label(placeholder, text=message, anchor='center', justify='center').pack(fill='both', expand=True, padx=16, pady=16)
         self.preview_notebook.add(placeholder, text='Preview')
 
+    def add_image_preview_tab(self, tab_title: str, image_path: FilePath, image_key: str):
+        """Add one rendered output image to the preview notebook."""
+        if not image_path.exists():
+            return
+
+        tab = ttk.Frame(self.preview_notebook)
+        with Image.open(image_path) as image:
+            pil_image = image.copy()
+        pil_image.thumbnail((980, 680))
+        photo = ImageTk.PhotoImage(pil_image)
+        self.preview_images[image_key] = photo
+
+        ttk.Label(tab, image=photo).pack(fill='both', expand=True, padx=12, pady=(12, 6))
+        ttk.Label(tab, text=str(image_path)).pack(anchor='w', padx=12, pady=(0, 12))
+        self.preview_notebook.add(tab, text=tab_title)
+
     def show_output_previews(self, result: Dict[str, object]):
         for tab_id in self.preview_notebook.tabs():
             self.preview_notebook.forget(tab_id)
@@ -1692,27 +1747,28 @@ class PollutionParticleApp:
         summary_text.configure(state='disabled')
         self.preview_notebook.add(summary_tab, text='Summary')
 
-        tab_titles = {
-            'scatter': '3D Scatter',
-            'bars': 'Bar Charts',
-            'heatmap': 'Heatmap',
-            'infographic': 'Infographic',
-        }
-        for key in ['scatter', 'bars', 'heatmap', 'infographic']:
-            image_path = FilePath(result['output_files'][key])
-            if not image_path.exists():
+        self.add_image_preview_tab('Bar Charts', FilePath(result['output_files']['bars']), 'bars')
+
+        age_group_images = result['output_files'].get('age_group_images', {})
+        for age_key, age_group in result['config'].age_groups.items():
+            if age_key not in age_group_images:
                 continue
 
-            tab = ttk.Frame(self.preview_notebook)
-            with Image.open(image_path) as image:
-                pil_image = image.copy()
-            pil_image.thumbnail((980, 680))
-            photo = ImageTk.PhotoImage(pil_image)
-            self.preview_images[key] = photo
-
-            ttk.Label(tab, image=photo).pack(fill='both', expand=True, padx=12, pady=(12, 6))
-            ttk.Label(tab, text=str(image_path)).pack(anchor='w', padx=12, pady=(0, 12))
-            self.preview_notebook.add(tab, text=tab_titles[key])
+            age_display = format_age_display(age_group)
+            age_slug = slugify_for_filename(age_key)
+            for image_key, image_label in [
+                ('scatter', '3D Scatter'),
+                ('heatmap', 'Heatmap'),
+                ('infographic', 'Infographic'),
+            ]:
+                image_path = age_group_images[age_key].get(image_key)
+                if not image_path:
+                    continue
+                self.add_image_preview_tab(
+                    f'{age_display} | {image_label}',
+                    FilePath(image_path),
+                    f'{image_key}_{age_slug}',
+                )
 
 
 def launch_ui():
