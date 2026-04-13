@@ -1,1 +1,15 @@
 venv/*
+output/pm_3d_scatter_a_41_50_yrs.png
+output/pm_3d_scatter_b_36_40_yrs.png
+output/pm_3d_scatter_c_31_35_yrs.png
+output/pm_3d_scatter_d_21_30_yrs.png
+output/pm_deposition_bars.png
+output/pm_heatmap_a_41_50_yrs.png
+output/pm_heatmap_b_36_40_yrs.png
+output/pm_heatmap_c_31_35_yrs.png
+output/pm_heatmap_d_21_30_yrs.png
+output/pm_lung_infographic_a_41_50_yrs.png
+output/pm_lung_infographic_b_36_40_yrs.png
+output/pm_lung_infographic_c_31_35_yrs.png
+output/pm_lung_infographic_d_21_30_yrs.png
+output/pm_results_summary.txt

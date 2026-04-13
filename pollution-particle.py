@@ -740,7 +740,7 @@ def generate_lung_infographic(
 
     fig = plt.figure(figsize=(18, 11), facecolor='#f8f9fa')
     fig.suptitle(
-        f'PM {pm_size} µm Deposition in Human Respiratory System — {age_label}',
+        f'PM Deposition in Human Respiratory System — {age_label}',
         fontsize=17, fontweight='bold', y=0.97, color='#2c3e50'
     )
 
@@ -964,10 +964,29 @@ def generate_lung_infographic(
                                        facecolor=al_color, edgecolor='#c0392b',
                                        linewidth=0.4, alpha=0.65, zorder=3))
 
-    # ======== PM DEPOSITION SPOTS ========
-    # Scatter coloured dots proportional to deposition in each region
-    dep_rng = np.random.default_rng(99)
-    spot_cmap = plt.cm.hot_r  # warm colours for deposited particles
+    # ======== PM DEPOSITION SPOTS — all PM sizes, color+size encoded ========
+    # Each PM size gets: unique color (violet→red), log-scaled dot size, glow effect
+
+    # PM size → color palette (matches the 3D scatter colour scheme)
+    PM_COLORS = {
+        0.1:  '#8B00FF',  # violet  — ultrafine
+        0.5:  '#3333FF',  # blue
+        1.0:  '#00BFFF',  # cyan
+        1.5:  '#00CC44',  # green
+        2.0:  '#DDBB00',  # yellow (darkened for visibility on light background)
+        2.5:  '#FF8C00',  # orange
+        10.0: '#FF0000',  # red     — coarse
+    }
+    palette_fallback = plt.cm.turbo(np.linspace(0.08, 0.92, len(pm_sizes)))
+    fallback_map = {pm: palette_fallback[i] for i, pm in enumerate(pm_sizes)}
+
+    def _get_pm_color(pm):
+        return PM_COLORS.get(pm, fallback_map.get(pm, '#888888'))
+
+    def _pm_spot_radius(pm_um):
+        """Log-scale: PM 0.1 → r=0.025 axes units, PM 10 → r=0.120 axes units."""
+        log_t = (np.log10(pm_um) - np.log10(0.1)) / (np.log10(10.0) - np.log10(0.1))
+        return 0.025 + log_t * 0.095
 
     # Build Path objects from lung silhouettes for accurate containment checks
     left_lung_path = Path(ll, lc)
@@ -976,46 +995,113 @@ def generate_lung_infographic(
     def _inside_lungs(px, py):
         return left_lung_path.contains_point((px, py)) or right_lung_path.contains_point((px, py))
 
-    # --- ET region spots (nasal/pharynx area) ---
-    n_et = max(3, int(et_dep * 0.6))
-    for _ in range(n_et):
-        sx = dep_rng.uniform(4.25, 5.75)
-        sy = dep_rng.uniform(12.9, 14.3)
-        sr = dep_rng.uniform(0.04, 0.09)
-        ax_lung.add_patch(Ellipse((sx, sy), sr * 2, sr * 2,
-                                   facecolor='#e74c3c', edgecolor='none',
-                                   alpha=0.75, zorder=9))
+    # --- Region wash: semi-transparent colour fill showing total deposition intensity ---
+    total_et_all = sum(results[pm]['Extra-thoracic'][0] for pm in pm_sizes)
+    total_tb_all = sum(results[pm]['Conducting (Tubular)'][0] for pm in pm_sizes)
+    total_al_all = sum(results[pm]['Alveolar'][0] for pm in pm_sizes)
+    max_region_total = max(total_et_all, total_tb_all, total_al_all, 1)
 
-    # --- Tubular region spots (trachea & bronchi) ---
-    n_tb = max(5, int(tb_dep * 0.5))
-    for _ in range(n_tb):
-        sx = dep_rng.uniform(1.5, 8.5)
-        sy = dep_rng.uniform(5.0, 9.5)
-        if not _inside_lungs(sx, sy):
-            continue
-        sr = dep_rng.uniform(0.05, 0.12)
-        ax_lung.add_patch(Ellipse((sx, sy), sr * 2, sr * 2,
-                                   facecolor='#c0392b', edgecolor='none',
-                                   alpha=0.7, zorder=9))
+    ax_lung.add_patch(Ellipse((5.0, 13.6), 2.0, 1.6, facecolor='#9b59b6', edgecolor='none',
+                               alpha=0.05 + 0.10 * (total_et_all / max_region_total), zorder=5))
+    ax_lung.add_patch(Ellipse((5.0, 7.5), 8.0, 4.0, facecolor='#2980b9', edgecolor='none',
+                               alpha=0.04 + 0.10 * (total_tb_all / max_region_total), zorder=2))
+    ax_lung.add_patch(Ellipse((5.0, 3.0), 8.5, 4.5, facecolor='#c0392b', edgecolor='none',
+                               alpha=0.04 + 0.10 * (total_al_all / max_region_total), zorder=2))
 
-    # --- Alveolar region spots (lower lung periphery) ---
-    n_al = max(3, int(al_dep * 0.8))
-    for _ in range(n_al):
-        sx = dep_rng.uniform(0.6, 9.4)
-        sy = dep_rng.uniform(1.2, 5.0)
-        if not _inside_lungs(sx, sy):
-            continue
-        sr = dep_rng.uniform(0.06, 0.14)
-        ax_lung.add_patch(Ellipse((sx, sy), sr * 2, sr * 2,
-                                   facecolor='#922b21', edgecolor='none',
-                                   alpha=0.65, zorder=9))
+    # --- Multi-PM deposition dots with glow effect ---
+    # Scale factors reduced vs single-PM original to avoid overcrowding with 7 sizes overlaid
+    spot_scale_et = 0.30
+    spot_scale_tb = 0.22
+    spot_scale_al = 0.35
 
-    # Deposition legend
-    ax_lung.scatter([], [], c='#e74c3c', s=30, label=f'ET deposit ({et_dep:.1f}%)')
-    ax_lung.scatter([], [], c='#c0392b', s=30, label=f'Tubular deposit ({tb_dep:.1f}%)')
-    ax_lung.scatter([], [], c='#922b21', s=30, label=f'Alveolar deposit ({al_dep:.1f}%)')
-    ax_lung.legend(loc='lower right', fontsize=7.5, framealpha=0.9,
-                   edgecolor='#bdc3c7', fancybox=True, handletextpad=0.4)
+    for pm in pm_sizes:
+        pm_color = _get_pm_color(pm)
+        sr = _pm_spot_radius(pm)
+        pm_rng = np.random.default_rng(int(pm * 1000 + 99))
+
+        pm_et = results[pm]['Extra-thoracic'][0]
+        pm_tb = results[pm]['Conducting (Tubular)'][0]
+        pm_al = results[pm]['Alveolar'][0]
+
+        # ET spots (nasal/pharynx)
+        n_et = max(2, int(pm_et * spot_scale_et))
+        for _ in range(n_et):
+            sx = pm_rng.uniform(4.25, 5.75)
+            sy = pm_rng.uniform(12.9, 14.3)
+            ax_lung.add_patch(Ellipse((sx, sy), sr * 5, sr * 5,
+                                       facecolor=pm_color, edgecolor='none',
+                                       alpha=0.18, zorder=9))
+            ax_lung.add_patch(Ellipse((sx, sy), sr * 2, sr * 2,
+                                       facecolor=pm_color, edgecolor='white',
+                                       linewidth=0.3, alpha=0.85, zorder=10))
+
+        # TB spots (bronchial / conducting zone)
+        n_tb = max(3, int(pm_tb * spot_scale_tb))
+        placed, attempts = 0, 0
+        while placed < n_tb and attempts < n_tb * 8:
+            sx = pm_rng.uniform(1.5, 8.5)
+            sy = pm_rng.uniform(5.5, 9.5)
+            attempts += 1
+            if not _inside_lungs(sx, sy):
+                continue
+            ax_lung.add_patch(Ellipse((sx, sy), sr * 5, sr * 5,
+                                       facecolor=pm_color, edgecolor='none',
+                                       alpha=0.18, zorder=9))
+            ax_lung.add_patch(Ellipse((sx, sy), sr * 2, sr * 2,
+                                       facecolor=pm_color, edgecolor='white',
+                                       linewidth=0.3, alpha=0.82, zorder=10))
+            placed += 1
+
+        # AL spots (alveolar periphery)
+        n_al = max(2, int(pm_al * spot_scale_al))
+        placed, attempts = 0, 0
+        while placed < n_al and attempts < n_al * 8:
+            sx = pm_rng.uniform(0.6, 9.4)
+            sy = pm_rng.uniform(1.0, 5.0)
+            attempts += 1
+            if not _inside_lungs(sx, sy):
+                continue
+            ax_lung.add_patch(Ellipse((sx, sy), sr * 5, sr * 5,
+                                       facecolor=pm_color, edgecolor='none',
+                                       alpha=0.18, zorder=9))
+            ax_lung.add_patch(Ellipse((sx, sy), sr * 2, sr * 2,
+                                       facecolor=pm_color, edgecolor='white',
+                                       linewidth=0.3, alpha=0.78, zorder=10))
+            placed += 1
+
+    # --- Two-part legend: PM sizes (lower-left) + Regions (lower-right) ---
+    from matplotlib.lines import Line2D
+
+    pm_labels = {
+        0.1: 'PM 0.1 (Ultrafine)', 0.5: 'PM 0.5', 1.0: 'PM 1.0',
+        1.5: 'PM 1.5', 2.0: 'PM 2.0', 2.5: 'PM 2.5 (Fine)', 10.0: 'PM 10 (Coarse)',
+    }
+    pm_handles = [
+        Line2D([0], [0], marker='o', color='none',
+               markerfacecolor=_get_pm_color(pm),
+               markeredgecolor='white', markeredgewidth=0.5,
+               markersize=4 + (_pm_spot_radius(pm) / 0.12) * 8,
+               label=pm_labels.get(pm, f'PM {pm} µm'))
+        for pm in pm_sizes
+    ]
+    region_handles = [
+        Line2D([0], [0], marker='s', color='none', markerfacecolor='#9b59b6',
+               markersize=9, label='Extra-Thoracic region'),
+        Line2D([0], [0], marker='s', color='none', markerfacecolor='#2980b9',
+               markersize=9, label='Conducting Airways region'),
+        Line2D([0], [0], marker='s', color='none', markerfacecolor='#c0392b',
+               markersize=9, label='Alveolar region'),
+    ]
+
+    leg1 = ax_lung.legend(handles=pm_handles, title='Particle Size', title_fontsize=7.5,
+                          bbox_to_anchor=(0.0, 1.02), loc='lower left',
+                          bbox_transform=ax_lung.transAxes,
+                          fontsize=7, framealpha=0.93,
+                          edgecolor='#bdc3c7', fancybox=True, ncol=4)
+    ax_lung.add_artist(leg1)
+    ax_lung.legend(handles=region_handles, title='Deposition Regions', title_fontsize=7.5,
+                   loc='lower right', fontsize=7, framealpha=0.93,
+                   edgecolor='#bdc3c7', fancybox=True)
 
     # ======== REGION LABELS ========
     ax_lung.annotate('EXTRA-THORACIC\nREGION', xy=(4.2, 13.2), xytext=(0.5, 13.8),
